@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Evaluation utilities for open-loop rollouts and visualization."""
+
 import argparse
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -23,6 +25,7 @@ def rollout_open_loop(
     device: torch.device,
     capture_video: bool = False,
 ) -> Tuple[float, List[np.ndarray]]:
+    """Roll out the model in open-loop for a fixed horizon."""
     obs, _ = env.reset()
     pred_stack = obs.copy()
 
@@ -55,6 +58,7 @@ def rollout_open_loop(
 
 
 def evaluate(args: argparse.Namespace) -> None:
+    """Evaluate horizons, save videos, and plot MSE vs horizon."""
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
 
@@ -119,6 +123,7 @@ def evaluate(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Define CLI arguments for evaluation."""
     p = argparse.ArgumentParser(description="Evaluate Atari world model")
     p.add_argument("--checkpoint", type=str, required=True)
     p.add_argument("--game", type=str, required=True)
@@ -132,6 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Entry point for CLI."""
     args = build_parser().parse_args()
     evaluate(args)
 

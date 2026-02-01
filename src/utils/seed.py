@@ -1,3 +1,5 @@
+"""Seeding helpers for reproducibility across python, numpy, torch, and envs."""
+
 import os
 import random
 from typing import Optional
@@ -33,4 +35,5 @@ def seed_env(env, seed: int) -> None:
 
 
 def maybe_get_seed(seed: Optional[int]) -> int:
+    """Normalize optional seed to an int (default 0)."""
     return int(seed) if seed is not None else 0

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+"""Baseline action-conditioned world model (encoder + conditioner + decoder)."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class Encoder(nn.Module):
+    """CNN encoder that compresses a 4-frame stack into a latent vector."""
     def __init__(self, latent_dim: int):
+        """Initialize convolutional backbone and projection head."""
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(4, 32, kernel_size=4, stride=2),
@@ -21,13 +25,16 @@ class Encoder(nn.Module):
         self.fc = nn.Linear(256 * 6 * 6, latent_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode stacked observations into a latent embedding."""
         x = self.conv(x)
         x = x.view(x.size(0), -1)
         return self.fc(x)
 
 
 class Decoder(nn.Module):
+    """CNN decoder that predicts the next frame from a fused latent."""
     def __init__(self, input_dim: int):
+        """Initialize projection and upsampling stack."""
         super().__init__()
         self.fc = nn.Linear(input_dim, 256 * 6 * 6)
         self.conv1 = nn.Conv2d(256, 128, kernel_size=3, padding=1)
@@ -37,6 +44,7 @@ class Decoder(nn.Module):
         self.conv_out = nn.Conv2d(16, 1, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Decode latent features into a normalized next frame."""
         x = self.fc(x)
         x = x.view(x.size(0), 256, 6, 6)
         x = F.relu(self.conv1(x))
@@ -52,6 +60,7 @@ class Decoder(nn.Module):
 
 
 class WorldModel(nn.Module):
+    """Action-conditioned next-frame predictor with concat conditioning."""
     def __init__(
         self,
         num_actions: int,
@@ -59,6 +68,7 @@ class WorldModel(nn.Module):
         latent_dim: int = 512,
         condition_mode: str = "concat",
     ):
+        """Build encoder, action embedding, and decoder blocks."""
         super().__init__()
         self.num_actions = num_actions
         self.condition_mode = condition_mode
@@ -81,6 +91,7 @@ class WorldModel(nn.Module):
         self.decoder = Decoder(input_dim=256 * 6 * 6)
 
     def forward(self, obs_stack: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        """Predict next frame given stacked observation and action."""
         z = self.encoder(obs_stack)
         if self.condition_mode == "concat":
             a = self.action_embed(action)

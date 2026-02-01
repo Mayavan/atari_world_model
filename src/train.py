@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Training loop for the Atari world model with mixed precision support."""
+
 import argparse
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from src.utils.seed import set_seed
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Define CLI arguments for training."""
     p = argparse.ArgumentParser(description="Train Atari world model")
     p.add_argument("--data_dir", type=str, required=True)
     p.add_argument("--game", type=str, required=True)
@@ -35,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def train(args: argparse.Namespace) -> None:
+    """Run a simple teacher-forced training loop and save checkpoints."""
     set_seed(args.seed)
 
     dataset = OfflineAtariDataset(args.data_dir)
@@ -111,6 +115,7 @@ def train(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    """Entry point for CLI."""
     args = build_parser().parse_args()
     train(args)
 

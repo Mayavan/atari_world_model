@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Video helpers for saving rollouts and creating side-by-side frames."""
+
 from pathlib import Path
 from typing import Iterable, List
 
@@ -8,6 +10,7 @@ import numpy as np
 
 
 def _to_uint8(frame: np.ndarray) -> np.ndarray:
+    """Convert a frame to uint8 for writing."""
     if frame.dtype != np.uint8:
         frame = np.clip(frame, 0.0, 1.0)
         frame = (frame * 255.0).astype(np.uint8)
@@ -15,6 +18,7 @@ def _to_uint8(frame: np.ndarray) -> np.ndarray:
 
 
 def save_video_mp4(frames: Iterable[np.ndarray], path: str | Path, fps: int = 30) -> None:
+    """Save a sequence of frames to an MP4 file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with imageio.get_writer(path, fps=fps, codec="libx264") as writer:
@@ -23,6 +27,7 @@ def save_video_mp4(frames: Iterable[np.ndarray], path: str | Path, fps: int = 30
 
 
 def save_gif(frames: Iterable[np.ndarray], path: str | Path, fps: int = 30) -> None:
+    """Save a sequence of frames to a GIF file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     duration = 1.0 / max(1, fps)

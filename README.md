@@ -5,18 +5,22 @@ Offline next-frame prediction world model for Atari using Gymnasium and PyTorch.
 ## Setup
 
 ```bash
-python -m venv .venv
+./scripts/setup_venv.sh
 source .venv/bin/activate
-pip install -r requirements.txt
+```
+
+Later, you can activate with:
+```bash
+./scripts/activate_venv.sh
 ```
 
 ### ROMs
-Gymnasium Atari requires ROMs. If you see ROM errors:
+Gymnasium with Atari support is already included in dependencies. You still need to download ROMs once using AutoROM:
 
 ```bash
-pip install "gymnasium[atari,accept-rom-license]"
-python -m gymnasium.utils.install_roms
+AutoROM --accept-license
 ```
+
 
 ## Commands
 
