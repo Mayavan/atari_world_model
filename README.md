@@ -63,7 +63,7 @@ python -m src.eval --checkpoint runs/.../ckpt.pt --game Pong --wandb_mode disabl
 
 - Dataset shards: `data/pong/shard_*_{obs,next_obs,action,done}.npy`
 - Manifest: `data/pong/manifest.json`
-- Training run: `runs/<timestamp>_<game>/metrics.csv`, `runs/<timestamp>_<game>/val_metrics.csv`, `runs/<timestamp>_<game>/images/`, `runs/<timestamp>_<game>/checkpoints/`, `runs/<timestamp>_<game>/resolved_config.yaml`
+- Training run: `runs/<timestamp>_<game>/metrics.csv`, `runs/<timestamp>_<game>/val_metrics.csv`, `runs/<timestamp>_<game>/images/`, `runs/<timestamp>_<game>/videos/`, `runs/<timestamp>_<game>/checkpoints/`, `runs/<timestamp>_<game>/resolved_config.yaml`
 - Eval artifacts: `runs/<timestamp>_<game>_eval/videos/` (MP4 + GIF), `runs/<timestamp>_<game>_eval/plots/mse_vs_horizon.png`
 
 ## Notes
@@ -75,6 +75,7 @@ python -m src.eval --checkpoint runs/.../ckpt.pt --game Pong --wandb_mode disabl
 - Data config is validated at startup and will raise if values are inconsistent.
 - Train/val split is controlled by `data.val_ratio` and validation runs every `train.val_every_steps`.
 - At `train.log_every`, an image strip of the 4 input frames plus predicted next frame is saved (and logged to W&B if enabled).
+- Each validation run can optionally trigger an open-loop rollout video (left=GT, right=prediction) controlled by `train.val_rollout_*`.
 - Default loss: Huber. Use `train.loss=mse` for MSE.
 - CPU-only execution is supported via `train.cpu=true`.
 

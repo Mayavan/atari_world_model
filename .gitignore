@@ -10,3 +10,4 @@ runs/
 .ruff_cache/
 build/
 dist/
+wandb/

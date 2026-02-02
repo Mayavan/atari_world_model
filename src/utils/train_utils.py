@@ -11,6 +11,7 @@ import torch
 import wandb
 
 from src.utils.metrics import huber, mse
+from src.utils.video import save_video_mp4, side_by_side
 
 
 def parse_train_cli(argv: list[str]) -> tuple[Path, list[str]]:
@@ -90,3 +91,52 @@ def save_image(
     imageio.imwrite(path, (image * 255.0).astype(np.uint8))
     if wandb_run is not None:
         wandb.log({f"{tag}_viz": wandb.Image(str(path))}, step=step)
+
+
+def run_rollout_video(
+    *,
+    model: torch.nn.Module,
+    env,
+    device: torch.device,
+    horizon: int,
+    fps: int,
+    step: int,
+    video_dir: Path,
+    wandb_run,
+    tag: str = "val_rollout",
+) -> Path | None:
+    """Run an open-loop rollout and save a side-by-side video."""
+    if horizon <= 0:
+        return None
+    was_training = model.training
+    model.eval()
+    obs, _ = env.reset()
+    pred_stack = obs.copy()
+
+    frames: list[np.ndarray] = []
+    with torch.no_grad():
+        for _ in range(horizon):
+            action = env.action_space.sample()
+            obs_t = torch.from_numpy(pred_stack).unsqueeze(0).to(device)
+            action_t = torch.tensor([action], device=device, dtype=torch.int64)
+            pred = model(obs_t, action_t)
+            pred_frame = pred.squeeze(0).squeeze(0).cpu().numpy()
+
+            next_obs, _, terminated, truncated, _ = env.step(action)
+            gt_frame = next_obs[-1]
+            frames.append(side_by_side(gt_frame, pred_frame))
+
+            pred_stack = np.concatenate([pred_stack[1:], pred_frame[None, ...]], axis=0)
+            if terminated or truncated:
+                break
+
+    if was_training:
+        model.train()
+
+    if not frames:
+        return None
+    path = video_dir / f"{tag}_step_{step:08d}.mp4"
+    save_video_mp4(frames, path, fps=fps)
+    if wandb_run is not None:
+        wandb.log({tag: wandb.Video(str(path), fps=fps, format="mp4")}, step=step)
+    return path

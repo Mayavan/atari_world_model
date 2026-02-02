@@ -19,6 +19,7 @@ from src.utils.seed import set_seed
 from src.utils.train_utils import (
     log_prediction_image,
     parse_train_cli,
+    run_rollout_video,
     run_validation,
     save_image,
 )
@@ -73,6 +74,17 @@ def train(cfg: dict) -> None:
         drop_last_train=True,
         drop_last_val=False,
     )
+    val_rollout_enabled = bool(train_cfg.get("val_rollout_enabled", True))
+    val_rollout_horizon = int(train_cfg.get("val_rollout_horizon", 30))
+    val_rollout_fps = int(train_cfg.get("val_rollout_fps", 30))
+    val_rollout_ready = (
+        val_loader is not None
+        and int(train_cfg.get("val_every_steps", 0)) > 0
+        and val_rollout_enabled
+    )
+    val_env = None
+    if val_rollout_ready:
+        val_env = make_atari_env(data_cfg.game, seed=int(experiment["seed"]))
 
     model = WorldModel(num_actions=num_actions, condition_mode=model_cfg["condition"])
     model.to(device)
@@ -100,6 +112,7 @@ def train(cfg: dict) -> None:
 
     ckpt_dir = ensure_dir(Path(run_dir) / "checkpoints")
     image_dir = ensure_dir(Path(run_dir) / "images")
+    video_dir = ensure_dir(Path(run_dir) / "videos")
     metrics_path = Path(run_dir) / "metrics.csv"
     init_csv(metrics_path, ["epoch", "step", "loss"])
     val_metrics_path = Path(run_dir) / "val_metrics.csv"
@@ -163,6 +176,17 @@ def train(cfg: dict) -> None:
                             image_dir=image_dir,
                             wandb_run=wandb_run,
                         )
+                    if val_rollout_ready and val_env is not None:
+                        run_rollout_video(
+                            model=model,
+                            env=val_env,
+                            device=device,
+                            horizon=val_rollout_horizon,
+                            fps=val_rollout_fps,
+                            step=global_step,
+                            video_dir=video_dir,
+                            wandb_run=wandb_run,
+                        )
             if int(train_cfg["max_steps"]) > 0 and global_step >= int(train_cfg["max_steps"]):
                 stop_early = True
                 break
@@ -183,6 +207,8 @@ def train(cfg: dict) -> None:
     print(f"Training complete. Run dir: {run_dir}")
     if wandb_run is not None:
         wandb_run.finish()
+    if val_env is not None:
+        val_env.close()
 
 
 def main() -> None:
