@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from tqdm import tqdm
+import wandb
 
 from src.envs.atari_wrappers import make_atari_env
 from src.models.world_model import WorldModel
@@ -62,6 +63,19 @@ def evaluate(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
 
+    wandb_run = None
+    if args.wandb_mode != "disabled":
+        try:
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                config=vars(args),
+                mode=args.wandb_mode,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"W&B init failed, continuing without logging: {e}")
+            wandb_run = None
+
     env = make_atari_env(args.game, seed=args.seed)
     num_actions = env.action_space.n
 
@@ -101,9 +115,18 @@ def evaluate(args: argparse.Namespace) -> None:
                 save_video_mp4(frames, mp4_path, fps=args.fps)
                 save_gif(frames, gif_path, fps=args.fps)
                 saved_video = True
+                if wandb_run is not None:
+                    try:
+                        wandb.log(
+                            {"rollout_video": wandb.Video(str(mp4_path), fps=args.fps, format="mp4")}
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        print(f"W&B video log failed: {e}")
 
         horizon_mse[horizon] = float(np.mean(mses))
         append_csv(metrics_path, [horizon, horizon_mse[horizon]])
+        if wandb_run is not None:
+            wandb.log({"mse": horizon_mse[horizon], "horizon": horizon}, step=horizon)
 
     horizons_sorted = sorted(horizon_mse.keys())
     values = [horizon_mse[h] for h in horizons_sorted]
@@ -120,6 +143,12 @@ def evaluate(args: argparse.Namespace) -> None:
 
     print(f"Eval complete. Results in {run_dir}")
     env.close()
+    if wandb_run is not None:
+        try:
+            wandb.log({"mse_vs_horizon": wandb.Image(str(plot_path))})
+        except Exception as e:  # noqa: BLE001
+            print(f"W&B image log failed: {e}")
+        wandb_run.finish()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -131,8 +160,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--horizons", type=int, nargs="+", default=[1, 5, 10, 30])
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--cpu", action="store_true")
     p.add_argument("--condition", type=str, default="concat", choices=["concat", "film"])
+    p.add_argument("--cpu", action="store_true", help="Force CPU execution")
+    p.add_argument("--wandb_project", type=str, default="atari_world_model")
+    p.add_argument("--wandb_entity", type=str, default="mayavan-projects")
+    p.add_argument(
+        "--wandb_mode",
+        type=str,
+        default="online",
+        choices=["online", "offline", "disabled"],
+        help="W&B mode (use offline to avoid network calls)",
+    )
     return p
 
 

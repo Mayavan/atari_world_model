@@ -18,12 +18,12 @@ dependencies = [
   "gymnasium>=0.29.1",
   "ale-py>=0.11.2",
   "autorom[accept-rom-license]>=0.6.1",
-  "opencv-python>=4.8",
   "imageio>=2.34",
   "imageio-ffmpeg>=0.4.9",
   "matplotlib>=3.8",
+  "pyyaml>=6.0",
   "tqdm>=4.66",
-  "pydantic>=2.6",
+  "wandb>=0.16.6",
 ]
 
 [project.optional-dependencies]

@@ -2,7 +2,6 @@
 
 import os
 import random
-from typing import Optional
 
 import numpy as np
 import torch
@@ -19,21 +18,3 @@ def set_seed(seed: int, deterministic: bool = False) -> None:
     if deterministic:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-
-
-def seed_env(env, seed: int) -> None:
-    """Seed a Gymnasium environment and its action space."""
-    try:
-        env.reset(seed=seed)
-    except TypeError:
-        env.seed(seed)
-    if hasattr(env, "action_space") and env.action_space is not None:
-        try:
-            env.action_space.seed(seed)
-        except Exception:
-            pass
-
-
-def maybe_get_seed(seed: Optional[int]) -> int:
-    """Normalize optional seed to an int (default 0)."""
-    return int(seed) if seed is not None else 0

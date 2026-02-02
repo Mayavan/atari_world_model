@@ -26,12 +26,17 @@ AutoROM --accept-license
 
 Generate dataset (random policy):
 ```bash
-python -m src.data.generate_dataset --game Pong --steps 300000 --out_dir data/pong
+python -m src.dataset.generate_dataset --game Pong --steps 300000 --out_dir data/pong
 ```
 
-Train:
+Train (uses `config.yaml`):
 ```bash
-python -m src.train --data_dir data/pong --game Pong
+python -m src.train
+```
+
+Override config values with dot notation:
+```bash
+python -m src.train optimizer.lr=1e-4 model.condition=film train.max_steps=5
 ```
 
 Evaluate:
@@ -39,19 +44,37 @@ Evaluate:
 python -m src.eval --checkpoint runs/.../ckpt.pt --game Pong
 ```
 
+### Weights & Biases
+Enable W&B logging for training and evaluation:
+
+```bash
+wandb login
+python -m src.train
+python -m src.eval --checkpoint runs/.../ckpt.pt --game Pong
+```
+
+To disable logging:
+```bash
+python -m src.train experiment.wandb.mode=disabled
+python -m src.eval --checkpoint runs/.../ckpt.pt --game Pong --wandb_mode disabled
+```
+
 ## Expected outputs
 
-- Dataset shards: `data/pong/shard_*.npz`
+- Dataset shards: `data/pong/shard_*_{obs,next_obs,action,done}.npy`
 - Manifest: `data/pong/manifest.json`
-- Training run: `runs/<timestamp>_<game>/metrics.csv`, `runs/<timestamp>_<game>/checkpoints/`
+- Training run: `runs/<timestamp>_<game>/metrics.csv`, `runs/<timestamp>_<game>/checkpoints/`, `runs/<timestamp>_<game>/resolved_config.yaml`
 - Eval artifacts: `runs/<timestamp>_<game>_eval/videos/` (MP4 + GIF), `runs/<timestamp>_<game>_eval/plots/mse_vs_horizon.png`
 
 ## Notes
 
 - Inputs are `(B, 4, 84, 84)` float32 in `[0,1]`, actions `(B,)` int64.
 - Targets are `(B, 1, 84, 84)` float32 in `[0,1]`.
-- Default loss: Huber. Use `--loss mse` for MSE.
-- CPU-only execution is supported via `--cpu` (slower).
+- Offline dataset shards are memory-mapped `.npy` files; random access pulls one sample at a time.
+- DataLoader settings are explicit in `config.yaml` (`num_workers`, `prefetch_factor`, `persistent_workers`, `pin_memory`); set `prefetch_factor: null` when `num_workers: 0`.
+- Data config is validated at startup and will raise if values are inconsistent.
+- Default loss: Huber. Use `train.loss=mse` for MSE.
+- CPU-only execution is supported via `train.cpu=true`.
 
 ## What to modify (core logic practice)
 

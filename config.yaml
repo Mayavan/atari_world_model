@@ -1,0 +1,39 @@
+experiment:
+  name: pong
+  seed: 0
+  run_dir: ""
+  wandb:
+    project: atari_world_model
+    entity: mayavan-projects
+    mode: online
+
+model:
+  condition: concat
+
+optimizer:
+  lr: 0.001
+
+scheduler:
+  type: onecycle
+  enabled: true
+  max_lr: 0.0
+  pct_start: 0.3
+  div_factor: 25.0
+  final_div_factor: 10000.0
+
+data:
+  data_dir: data/pong
+  game: Pong
+  batch_size: 32
+  num_workers: 2
+  prefetch_factor: 2
+  persistent_workers: true
+  pin_memory: true
+
+train:
+  epochs: 5
+  max_steps: 0
+  loss: huber
+  delta: 1.0
+  log_every: 100
+  cpu: false
