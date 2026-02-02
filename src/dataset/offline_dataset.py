@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from src.config import DataConfig
 from src.utils.io import read_json
@@ -111,7 +111,66 @@ def create_dataloader(
     drop_last: bool = True,
 ) -> DataLoader:
     """Create a DataLoader for the offline Atari dataset."""
+    return _build_loader(
+        dataset=OfflineAtariDataset(data_cfg.data_dir),
+        data_cfg=data_cfg,
+        shuffle=shuffle,
+        drop_last=drop_last,
+    )
+
+
+def create_train_val_loaders(
+    data_cfg: DataConfig,
+    *,
+    seed: int,
+    drop_last_train: bool = True,
+    drop_last_val: bool = False,
+) -> tuple[DataLoader, DataLoader | None]:
+    """Create train/val DataLoaders from a single dataset split."""
     dataset = OfflineAtariDataset(data_cfg.data_dir)
+    if data_cfg.val_ratio <= 0.0:
+        return _build_loader(dataset, data_cfg, shuffle=True, drop_last=drop_last_train), None
+
+    num_samples = len(dataset)
+    if num_samples == 0:
+        raise ValueError("Dataset is empty")
+    num_val = int(num_samples * data_cfg.val_ratio)
+    if data_cfg.val_ratio > 0.0 and num_val == 0:
+        num_val = 1
+    if num_val >= num_samples:
+        raise ValueError("val_ratio leaves no samples for training")
+
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(num_samples)
+    val_indices = perm[:num_val].tolist()
+    train_indices = perm[num_val:].tolist()
+
+    train_set = Subset(dataset, train_indices)
+    val_set = Subset(dataset, val_indices)
+
+    train_loader = _build_loader(
+        dataset=train_set,
+        data_cfg=data_cfg,
+        shuffle=True,
+        drop_last=drop_last_train,
+    )
+    val_loader = _build_loader(
+        dataset=val_set,
+        data_cfg=data_cfg,
+        shuffle=False,
+        drop_last=drop_last_val,
+    )
+    return train_loader, val_loader
+
+
+def _build_loader(
+    dataset: Dataset,
+    data_cfg: DataConfig,
+    *,
+    shuffle: bool,
+    drop_last: bool,
+) -> DataLoader:
+    """Create a DataLoader for an existing dataset."""
     return DataLoader(
         dataset,
         batch_size=data_cfg.batch_size,
@@ -122,4 +181,3 @@ def create_dataloader(
         prefetch_factor=data_cfg.prefetch_factor,
         persistent_workers=data_cfg.persistent_workers,
     )
-

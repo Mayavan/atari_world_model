@@ -55,6 +55,7 @@ class DataConfig:
     prefetch_factor: int | None
     persistent_workers: bool
     pin_memory: bool
+    val_ratio: float
 
 
 def _is_int(value: Any) -> bool:
@@ -70,6 +71,7 @@ def validate_data_config(data_cfg: Dict[str, Any]) -> DataConfig:
         "prefetch_factor",
         "persistent_workers",
         "pin_memory",
+        "val_ratio",
     ]
     missing = [key for key in required if key not in data_cfg]
     if missing:
@@ -111,6 +113,13 @@ def validate_data_config(data_cfg: Dict[str, Any]) -> DataConfig:
         if not _is_int(prefetch_factor) or prefetch_factor < 1:
             raise ValueError("prefetch_factor must be an integer >= 1")
 
+    val_ratio = data_cfg["val_ratio"]
+    if not isinstance(val_ratio, (int, float)):
+        raise ValueError("val_ratio must be a number")
+    val_ratio = float(val_ratio)
+    if val_ratio < 0.0 or val_ratio >= 1.0:
+        raise ValueError("val_ratio must be in [0.0, 1.0)")
+
     return DataConfig(
         data_dir=data_dir,
         game=game,
@@ -119,4 +128,5 @@ def validate_data_config(data_cfg: Dict[str, Any]) -> DataConfig:
         prefetch_factor=prefetch_factor,
         persistent_workers=persistent_workers,
         pin_memory=pin_memory,
+        val_ratio=val_ratio,
     )

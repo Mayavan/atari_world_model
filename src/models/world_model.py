@@ -14,12 +14,16 @@ class Encoder(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(4, 32, kernel_size=4, stride=2),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Conv2d(64, 128, kernel_size=4, stride=2),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.Conv2d(128, 256, kernel_size=3, stride=1),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
         )
         self.fc = nn.Linear(256 * 6 * 6, latent_dim)
@@ -38,25 +42,30 @@ class Decoder(nn.Module):
         super().__init__()
         self.fc = nn.Linear(input_dim, 256 * 6 * 6)
         self.conv1 = nn.Conv2d(256, 128, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(128)
         self.conv2 = nn.Conv2d(128, 64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
         self.conv3 = nn.Conv2d(64, 32, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(32)
         self.conv4 = nn.Conv2d(32, 16, kernel_size=3, padding=1)
+        self.bn4 = nn.BatchNorm2d(16)
         self.conv_out = nn.Conv2d(16, 1, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Decode latent features into a normalized next frame."""
         x = self.fc(x)
         x = x.view(x.size(0), 256, 6, 6)
-        x = F.relu(self.conv1(x))
+        x = F.relu(self.bn1(self.conv1(x)))
         x = F.interpolate(x, size=(12, 12), mode="bilinear", align_corners=False)
-        x = F.relu(self.conv2(x))
+        x = F.relu(self.bn2(self.conv2(x)))
         x = F.interpolate(x, size=(24, 24), mode="bilinear", align_corners=False)
-        x = F.relu(self.conv3(x))
+        x = F.relu(self.bn3(self.conv3(x)))
         x = F.interpolate(x, size=(48, 48), mode="bilinear", align_corners=False)
-        x = F.relu(self.conv4(x))
+        x = F.relu(self.bn4(self.conv4(x)))
         x = F.interpolate(x, size=(84, 84), mode="bilinear", align_corners=False)
         x = self.conv_out(x)
         return torch.sigmoid(x)
+
 
 
 class WorldModel(nn.Module):

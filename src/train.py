@@ -1,28 +1,27 @@
 from __future__ import annotations
 
-"""Training loop for the Atari world model with mixed precision support."""
+"""Training loop for the Atari world model."""
 
 import sys
 from pathlib import Path
 
 import torch
-from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 import wandb
 
 from src.config import apply_overrides, load_config, save_config, validate_data_config
-from src.dataset.offline_dataset import create_dataloader
+from src.dataset.offline_dataset import create_train_val_loaders
 from src.envs.atari_wrappers import make_atari_env
 from src.models.world_model import WorldModel
 from src.utils.io import ensure_dir, init_csv, append_csv, timestamp_dir
 from src.utils.metrics import huber, mse
 from src.utils.seed import set_seed
-
-
-def _parse_cli(argv: list[str]) -> tuple[Path, list[str]]:
-    if len(argv) >= 2 and argv[1].endswith((".yaml", ".yml")):
-        return Path(argv[1]), argv[2:]
-    return Path("config.yaml"), argv[1:]
+from src.utils.train_utils import (
+    log_prediction_image,
+    parse_train_cli,
+    run_validation,
+    save_image,
+)
 
 
 def train(cfg: dict) -> None:
@@ -68,16 +67,20 @@ def train(cfg: dict) -> None:
     force_cpu = bool(train_cfg.get("cpu", False))
     device = torch.device("cuda" if torch.cuda.is_available() and not force_cpu else "cpu")
     use_cuda = device.type == "cuda"
-    loader = create_dataloader(data_cfg, shuffle=True, drop_last=True)
+    train_loader, val_loader = create_train_val_loaders(
+        data_cfg,
+        seed=int(experiment["seed"]),
+        drop_last_train=True,
+        drop_last_val=False,
+    )
 
     model = WorldModel(num_actions=num_actions, condition_mode=model_cfg["condition"])
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=float(optimizer_cfg["lr"]))
-    scaler = GradScaler("cuda" if use_cuda else "cpu", enabled=use_cuda)
     scheduler = None
     if scheduler_cfg["enabled"] and scheduler_cfg["type"] == "onecycle":
-        total_steps = len(loader) * int(train_cfg["epochs"])
+        total_steps = len(train_loader) * int(train_cfg["epochs"])
         max_steps = int(train_cfg["max_steps"])
         if max_steps > 0:
             total_steps = min(total_steps, max_steps)
@@ -96,14 +99,18 @@ def train(cfg: dict) -> None:
         )
 
     ckpt_dir = ensure_dir(Path(run_dir) / "checkpoints")
+    image_dir = ensure_dir(Path(run_dir) / "images")
     metrics_path = Path(run_dir) / "metrics.csv"
     init_csv(metrics_path, ["epoch", "step", "loss"])
+    val_metrics_path = Path(run_dir) / "val_metrics.csv"
+    if val_loader is not None and int(train_cfg["val_every_steps"]) > 0:
+        init_csv(val_metrics_path, ["step", "val_loss"])
 
     global_step = 0
     model.train()
     stop_early = False
     for epoch in range(1, int(train_cfg["epochs"]) + 1):
-        pbar = tqdm(loader, desc=f"epoch {epoch}")
+        pbar = tqdm(train_loader, desc=f"epoch {epoch}")
         for batch in pbar:
             obs, action, next_obs, _ = batch
             obs = obs.to(device)
@@ -111,16 +118,14 @@ def train(cfg: dict) -> None:
             next_obs = next_obs.to(device)
 
             optimizer.zero_grad(set_to_none=True)
-            with autocast(device_type="cuda" if use_cuda else "cpu", enabled=use_cuda):
-                pred = model(obs, action)
-                if train_cfg["loss"] == "huber":
-                    loss = huber(pred, next_obs, delta=float(train_cfg["delta"]))
-                else:
-                    loss = mse(pred, next_obs)
+            pred = model(obs, action)
+            if train_cfg["loss"] == "huber":
+                loss = huber(pred, next_obs, delta=float(train_cfg["delta"]))
+            else:
+                loss = mse(pred, next_obs)
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            loss.backward()
+            optimizer.step()
             if scheduler is not None:
                 scheduler.step()
 
@@ -128,9 +133,36 @@ def train(cfg: dict) -> None:
             if global_step % int(train_cfg["log_every"]) == 0:
                 pbar.set_postfix({"loss": float(loss.item())})
                 append_csv(metrics_path, [epoch, global_step, float(loss.item())])
-                print(f"step {global_step} loss {loss.item():.6f}")
                 if wandb_run is not None:
                     wandb.log({"loss": float(loss.item()), "epoch": epoch}, step=global_step)
+                log_prediction_image(
+                    tag="train",
+                    step=global_step,
+                    obs=obs,
+                    pred=pred,
+                    image_dir=image_dir,
+                    wandb_run=wandb_run,
+                )
+            if val_loader is not None and int(train_cfg["val_every_steps"]) > 0:
+                if global_step % int(train_cfg["val_every_steps"]) == 0:
+                    val_loss, val_viz = run_validation(
+                        model=model,
+                        loader=val_loader,
+                        device=device,
+                        loss_name=str(train_cfg["loss"]),
+                        delta=float(train_cfg["delta"]),
+                    )
+                    append_csv(val_metrics_path, [global_step, val_loss])
+                    if wandb_run is not None:
+                        wandb.log({"val_loss": val_loss}, step=global_step)
+                    if val_viz is not None:
+                        save_image(
+                            tag="val",
+                            step=global_step,
+                            image=val_viz,
+                            image_dir=image_dir,
+                            wandb_run=wandb_run,
+                        )
             if int(train_cfg["max_steps"]) > 0 and global_step >= int(train_cfg["max_steps"]):
                 stop_early = True
                 break
@@ -155,7 +187,7 @@ def train(cfg: dict) -> None:
 
 def main() -> None:
     """Entry point for CLI."""
-    config_path, overrides = _parse_cli(sys.argv)
+    config_path, overrides = parse_train_cli(sys.argv)
     cfg = load_config(config_path)
     apply_overrides(cfg, overrides)
     train(cfg)

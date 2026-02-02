@@ -29,11 +29,13 @@ data:
   prefetch_factor: 2
   persistent_workers: true
   pin_memory: true
+  val_ratio: 0.1
 
 train:
   epochs: 5
   max_steps: 0
   loss: huber
   delta: 1.0
-  log_every: 100
+  log_every: 1000
+  val_every_steps: 10000
   cpu: false
