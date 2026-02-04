@@ -3,6 +3,7 @@ from __future__ import annotations
 """Evaluation utilities for open-loop rollouts and visualization."""
 
 import argparse
+from collections import deque
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -28,21 +29,27 @@ def rollout_open_loop(
 ) -> Tuple[float, List[np.ndarray]]:
     """Roll out the model in open-loop for a fixed horizon."""
     obs, _ = env.reset()
-    pred_stack = obs.copy()
+    n_past_frames = int(getattr(model, "n_past_frames", obs.shape[0]))
+    n_past_actions = int(getattr(model, "n_past_actions", 0))
+    n_future_frames = int(getattr(model, "n_future_frames", 1))
+    pred_stack = obs[-n_past_frames:].copy()
+    past_actions = deque([0] * n_past_actions, maxlen=n_past_actions)
 
     frames: List[np.ndarray] = []
 
     last_mse = 0.0
     for _ in range(horizon):
-        action = env.action_space.sample()
+        future_actions = [env.action_space.sample() for _ in range(n_future_frames)]
+        action = future_actions[0]
         obs_t = torch.from_numpy(pred_stack).unsqueeze(0).to(device)
-        action_t = torch.tensor([action], device=device, dtype=torch.int64)
+        future_t = torch.tensor([future_actions], device=device, dtype=torch.int64)
+        past_t = torch.tensor([list(past_actions)], device=device, dtype=torch.int64)
 
         with torch.no_grad():
-            next_pred = model(obs_t, action_t)
-        next_frame = next_pred.squeeze(0).squeeze(0).cpu().numpy()
-        # Clamp only when forming image frames/stack; next_frame is unconstrained.
-        pred_frame = np.clip(next_frame, 0.0, 1.0)
+            logits = model(obs_t, future_t, past_t)
+            pred = torch.sigmoid(logits)
+        next_frame = pred[:, 0].squeeze(0).cpu().numpy()
+        pred_frame = next_frame
 
         next_obs, _, terminated, truncated, _ = env.step(action)
         gt_frame = next_obs[-1]
@@ -53,6 +60,8 @@ def rollout_open_loop(
             frames.append(side_by_side(gt_frame, pred_frame))
 
         pred_stack = np.concatenate([pred_stack[1:], pred_frame[None, ...]], axis=0)
+        if n_past_actions > 0:
+            past_actions.append(action)
 
         if terminated or truncated:
             break
@@ -78,11 +87,25 @@ def evaluate(args: argparse.Namespace) -> None:
             print(f"W&B init failed, continuing without logging: {e}")
             wandb_run = None
 
-    env = make_atari_env(args.game, seed=args.seed)
+    ckpt = torch.load(args.checkpoint, map_location=device)
+    model_cfg = ckpt.get("model_cfg", {})
+    n_past_frames = int(model_cfg.get("n_past_frames", 4))
+    n_past_actions = int(model_cfg.get("n_past_actions", 0))
+    n_future_frames = int(model_cfg.get("n_future_frames", 1))
+    action_embed_dim = int(model_cfg.get("action_embed_dim", 64))
+    width_mult = float(model_cfg.get("width_mult", 1.0))
+
+    env = make_atari_env(args.game, seed=args.seed, frame_stack=n_past_frames)
     num_actions = env.action_space.n
 
-    ckpt = torch.load(args.checkpoint, map_location=device)
-    model = WorldModel(num_actions=num_actions)
+    model = WorldModel(
+        num_actions=num_actions,
+        n_past_frames=n_past_frames,
+        n_past_actions=n_past_actions,
+        n_future_frames=n_future_frames,
+        action_embed_dim=action_embed_dim,
+        width_mult=width_mult,
+    )
     model.load_state_dict(ckpt["model"])
     model.to(device)
     model.eval()

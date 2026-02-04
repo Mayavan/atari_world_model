@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-"""CLI for generating offline Atari transition shards from a random policy."""
+"""CLI for generating offline Atari sequence shards from a random policy."""
 
 import argparse
+from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
@@ -14,63 +15,91 @@ from src.utils.io import ensure_dir, write_json
 from src.utils.seed import set_seed
 
 
-def _maybe_uint8(arr: np.ndarray) -> np.ndarray:
-    """Convert normalized float observations to uint8 for compact on-disk storage."""
+def _should_uint8(arr: np.ndarray) -> bool:
+    """Return True if normalized float observations can be stored as uint8."""
     if np.issubdtype(arr.dtype, np.floating):
         min_val = float(np.min(arr))
         max_val = float(np.max(arr))
-        if min_val >= -1e-6 and max_val <= 1.0 + 1e-6:
-            scaled = np.rint(arr * 255.0).clip(0, 255).astype(np.uint8)
-            return scaled
-    return arr
+        return min_val >= -1e-6 and max_val <= 1.0 + 1e-6
+    return False
 
 
-def _flush_shard(
+def _to_uint8(arr: np.ndarray) -> np.ndarray:
+    """Convert normalized float observations to uint8 for compact on-disk storage."""
+    scaled = np.rint(arr * 255.0).clip(0, 255).astype(np.uint8)
+    return scaled
+
+
+def _open_shard_memmaps(
+    *,
     out_dir: Path,
     shard_idx: int,
-    obs_buf: List[np.ndarray],
-    action_buf: List[int],
-    next_buf: List[np.ndarray],
-    done_buf: List[bool],
-) -> Optional[Tuple[Dict[str, str], int]]:
-    """Write a single shard to disk and return its metadata."""
-    if not obs_buf:
-        return None
-
-    obs_arr = np.ascontiguousarray(np.stack(obs_buf, axis=0))
-    next_arr = np.ascontiguousarray(np.stack(next_buf, axis=0))
-    obs_arr = _maybe_uint8(obs_arr)
-    next_arr = _maybe_uint8(next_arr)
-    action_arr = np.asarray(action_buf, dtype=np.int64)
-    done_arr = np.asarray(done_buf, dtype=np.bool_)
-
+    shard_size: int,
+    seq_len: int,
+    frame_shape: Tuple[int, int],
+    frame_dtype: np.dtype,
+) -> Tuple[Dict[str, str], np.memmap, np.memmap, np.memmap]:
+    """Open memmaps for a shard so samples can stream to disk."""
     shard_base = f"shard_{shard_idx:06d}"
     paths = {
-        "obs": f"{shard_base}_obs.npy",
-        "next_obs": f"{shard_base}_next_obs.npy",
-        "action": f"{shard_base}_action.npy",
+        "frames": f"{shard_base}_frames.npy",
+        "actions": f"{shard_base}_actions.npy",
         "done": f"{shard_base}_done.npy",
     }
-    np.save(out_dir / paths["obs"], obs_arr, allow_pickle=False)
-    np.save(out_dir / paths["next_obs"], next_arr, allow_pickle=False)
-    np.save(out_dir / paths["action"], action_arr, allow_pickle=False)
-    np.save(out_dir / paths["done"], done_arr, allow_pickle=False)
-    return paths, len(obs_buf)
+    frames = np.lib.format.open_memmap(
+        out_dir / paths["frames"],
+        mode="w+",
+        dtype=frame_dtype,
+        shape=(shard_size, seq_len, *frame_shape),
+    )
+    actions = np.lib.format.open_memmap(
+        out_dir / paths["actions"],
+        mode="w+",
+        dtype=np.int64,
+        shape=(shard_size, seq_len),
+    )
+    done = np.lib.format.open_memmap(
+        out_dir / paths["done"],
+        mode="w+",
+        dtype=np.bool_,
+        shape=(shard_size, seq_len),
+    )
+    return paths, frames, actions, done
 
 
 def generate_dataset(args: argparse.Namespace) -> None:
-    """Collect transitions and write sharded NPY dataset plus manifest."""
+    """Collect sequences and write sharded NPY dataset plus manifest."""
     set_seed(args.seed)
     out_dir = ensure_dir(args.out_dir)
 
-    env = make_atari_env(args.game, seed=args.seed)
+    env = make_atari_env(args.game, seed=args.seed, frame_stack=1)
 
     obs, _ = env.reset(seed=args.seed)
+    if obs.ndim == 3:
+        frame = obs[-1]
+    else:
+        frame = obs
 
-    obs_buf: List[np.ndarray] = []
-    action_buf: List[int] = []
-    next_buf: List[np.ndarray] = []
-    done_buf: List[bool] = []
+    seq_len = int(args.seq_len)
+    if seq_len < 2:
+        raise ValueError("seq_len must be >= 2")
+    shard_size = int(args.shard_size)
+    if shard_size <= 0:
+        raise ValueError("shard_size must be > 0")
+
+    frame_hist: deque[np.ndarray] = deque(maxlen=seq_len + 1)
+    action_hist: deque[int] = deque(maxlen=seq_len)
+    done_hist: deque[bool] = deque(maxlen=seq_len)
+    frame_hist.append(frame)
+    frame_shape = tuple(int(v) for v in frame.shape)
+    use_uint8 = _should_uint8(frame)
+    frame_dtype = np.uint8 if use_uint8 else frame.dtype
+
+    shard_paths: Optional[Dict[str, str]] = None
+    shard_frames: Optional[np.memmap] = None
+    shard_actions: Optional[np.memmap] = None
+    shard_done: Optional[np.memmap] = None
+    shard_count = 0
 
     shards = []
     total = 0
@@ -81,57 +110,97 @@ def generate_dataset(args: argparse.Namespace) -> None:
         next_obs, _, terminated, truncated, _ = env.step(action)
         done = bool(terminated or truncated)
 
-        obs_buf.append(obs)
-        action_buf.append(int(action))
-        next_buf.append(next_obs[-1:])
-        done_buf.append(done)
-
-        total += 1
-
-        if done:
-            obs, _ = env.reset()
+        if next_obs.ndim == 3:
+            next_frame = next_obs[-1]
         else:
-            obs = next_obs
+            next_frame = next_obs
 
-        if len(obs_buf) >= args.shard_size:
-            result = _flush_shard(out_dir, shard_idx, obs_buf, action_buf, next_buf, done_buf)
-            if result is not None:
-                paths, count = result
+        action_hist.append(int(action))
+        done_hist.append(done)
+        frame_hist.append(next_frame)
+
+        if len(action_hist) == seq_len and len(frame_hist) == seq_len + 1:
+            # frames_seq[0]..frames_seq[-1] are consecutive frames; actions_seq[i]
+            # corresponds to the action taken after frames_seq[i] (leading to frames_seq[i+1]).
+            frames_seq = np.ascontiguousarray(np.stack(list(frame_hist)[:-1], axis=0))
+            if use_uint8:
+                frames_seq = _to_uint8(frames_seq)
+            actions_seq = np.asarray(action_hist, dtype=np.int64)
+            done_seq = np.asarray(done_hist, dtype=np.bool_)
+
+            if shard_frames is None:
+                shard_paths, shard_frames, shard_actions, shard_done = _open_shard_memmaps(
+                    out_dir=out_dir,
+                    shard_idx=shard_idx,
+                    shard_size=shard_size,
+                    seq_len=seq_len,
+                    frame_shape=frame_shape,
+                    frame_dtype=frame_dtype,
+                )
+
+            shard_frames[shard_count] = frames_seq
+            shard_actions[shard_count] = actions_seq
+            shard_done[shard_count] = done_seq
+            shard_count += 1
+            total += 1
+
+            if shard_count >= shard_size:
+                shard_frames.flush()
+                shard_actions.flush()
+                shard_done.flush()
                 shards.append(
                     {
                         "id": shard_idx,
-                        "count": count,
-                        "obs": paths["obs"],
-                        "next_obs": paths["next_obs"],
-                        "action": paths["action"],
-                        "done": paths["done"],
+                        "count": shard_count,
+                        "frames": shard_paths["frames"],
+                        "actions": shard_paths["actions"],
+                        "done": shard_paths["done"],
                     }
                 )
                 shard_idx += 1
-            obs_buf, action_buf, next_buf, done_buf = [], [], [], []
+                shard_frames = None
+                shard_actions = None
+                shard_done = None
+                shard_paths = None
+                shard_count = 0
 
-    result = _flush_shard(out_dir, shard_idx, obs_buf, action_buf, next_buf, done_buf)
-    if result is not None:
-        paths, count = result
+        if done:
+            obs, _ = env.reset()
+            if obs.ndim == 3:
+                frame = obs[-1]
+            else:
+                frame = obs
+            frame_hist.clear()
+            action_hist.clear()
+            done_hist.clear()
+            frame_hist.append(frame)
+        else:
+            obs = next_obs
+
+    if shard_frames is not None and shard_count > 0:
+        shard_frames.flush()
+        shard_actions.flush()
+        shard_done.flush()
         shards.append(
             {
                 "id": shard_idx,
-                "count": count,
-                "obs": paths["obs"],
-                "next_obs": paths["next_obs"],
-                "action": paths["action"],
-                "done": paths["done"],
+                "count": shard_count,
+                "frames": shard_paths["frames"],
+                "actions": shard_paths["actions"],
+                "done": shard_paths["done"],
             }
         )
 
     manifest = {
         "game": args.game,
         "steps": args.steps,
+        "seq_len": seq_len,
         "shards": shards,
         "total": total,
     }
     write_json(out_dir / "manifest.json", manifest)
-    print(f"Saved dataset to {out_dir} with {total} transitions and {len(shards)} shards")
+    env.close()
+    print(f"Saved dataset to {out_dir} with {total} sequences and {len(shards)} shards")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -140,7 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--game", type=str, required=True, help="Atari game name (e.g., Pong)")
     p.add_argument("--steps", type=int, default=300_000, help="Number of transitions to collect")
     p.add_argument("--out_dir", type=str, default="data", help="Output directory")
-    p.add_argument("--shard_size", type=int, default=50_000, help="Transitions per shard")
+    p.add_argument("--shard_size", type=int, default=50_000, help="Sequences per shard")
+    p.add_argument("--seq_len", type=int, default=8, help="Frames/actions per sequence")
     p.add_argument("--seed", type=int, default=0)
     return p
 

@@ -56,6 +56,9 @@ class DataConfig:
     persistent_workers: bool
     pin_memory: bool
     val_ratio: float
+    n_past_frames: int
+    n_past_actions: int
+    n_future_frames: int
 
 
 def _is_int(value: Any) -> bool:
@@ -72,6 +75,9 @@ def validate_data_config(data_cfg: Dict[str, Any]) -> DataConfig:
         "persistent_workers",
         "pin_memory",
         "val_ratio",
+        "n_past_frames",
+        "n_past_actions",
+        "n_future_frames",
     ]
     missing = [key for key in required if key not in data_cfg]
     if missing:
@@ -120,6 +126,21 @@ def validate_data_config(data_cfg: Dict[str, Any]) -> DataConfig:
     if val_ratio < 0.0 or val_ratio >= 1.0:
         raise ValueError("val_ratio must be in [0.0, 1.0)")
 
+    n_past_frames = data_cfg["n_past_frames"]
+    if not _is_int(n_past_frames) or n_past_frames <= 0:
+        raise ValueError("n_past_frames must be a positive integer")
+
+    n_past_actions = data_cfg["n_past_actions"]
+    if not _is_int(n_past_actions) or n_past_actions < 0:
+        raise ValueError("n_past_actions must be a non-negative integer")
+
+    n_future_frames = data_cfg["n_future_frames"]
+    if not _is_int(n_future_frames) or n_future_frames <= 0:
+        raise ValueError("n_future_frames must be a positive integer")
+
+    if n_past_actions > n_past_frames - 1:
+        raise ValueError("n_past_actions must be <= n_past_frames - 1")
+
     return DataConfig(
         data_dir=data_dir,
         game=game,
@@ -129,4 +150,7 @@ def validate_data_config(data_cfg: Dict[str, Any]) -> DataConfig:
         persistent_workers=persistent_workers,
         pin_memory=pin_memory,
         val_ratio=val_ratio,
+        n_past_frames=n_past_frames,
+        n_past_actions=n_past_actions,
+        n_future_frames=n_future_frames,
     )

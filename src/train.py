@@ -15,7 +15,6 @@ from src.dataset.offline_dataset import create_train_val_loaders
 from src.envs.atari_wrappers import make_atari_env
 from src.models.world_model import WorldModel
 from src.utils.io import ensure_dir, init_csv, append_csv, timestamp_dir
-from src.utils.metrics import huber, mse
 from src.utils.seed import set_seed
 from src.utils.train_utils import (
     log_prediction_image,
@@ -60,7 +59,11 @@ def train(cfg: dict) -> None:
 
     save_config(cfg, Path(run_dir) / "resolved_config.yaml")
 
-    env = make_atari_env(data_cfg.game, seed=int(experiment["seed"]))
+    env = make_atari_env(
+        data_cfg.game,
+        seed=int(experiment["seed"]),
+        frame_stack=data_cfg.n_past_frames,
+    )
     num_actions = env.action_space.n
     env.close()
 
@@ -76,7 +79,8 @@ def train(cfg: dict) -> None:
     val_rollout_enabled = bool(train_cfg.get("val_rollout_enabled", True))
     val_rollout_horizon = int(train_cfg.get("val_rollout_horizon", 30))
     val_rollout_fps = int(train_cfg.get("val_rollout_fps", 30))
-    motion_weight = float(train_cfg.get("motion_weight", 10.0))
+    motion_tau = float(train_cfg.get("motion_tau", 0.02))
+    motion_alpha = float(train_cfg.get("motion_alpha", train_cfg.get("motion_weight", 10.0)))
     val_rollout_ready = (
         val_loader is not None
         and int(train_cfg.get("val_every_steps", 0)) > 0
@@ -84,9 +88,23 @@ def train(cfg: dict) -> None:
     )
     val_env = None
     if val_rollout_ready:
-        val_env = make_atari_env(data_cfg.game, seed=int(experiment["seed"]))
+        val_env = make_atari_env(
+            data_cfg.game,
+            seed=int(experiment["seed"]),
+            frame_stack=data_cfg.n_past_frames,
+        )
 
-    model = WorldModel(num_actions=num_actions)
+    model_cfg = cfg.get("model", {})
+    width_mult = float(model_cfg.get("width_mult", 1.0))
+    action_embed_dim = int(model_cfg.get("action_embed_dim", 64))
+    model = WorldModel(
+        num_actions=num_actions,
+        n_past_frames=data_cfg.n_past_frames,
+        n_past_actions=data_cfg.n_past_actions,
+        n_future_frames=data_cfg.n_future_frames,
+        action_embed_dim=action_embed_dim,
+        width_mult=width_mult,
+    )
     model.to(device)
 
     if not (scheduler_cfg["enabled"] and scheduler_cfg["type"] == "onecycle"):
@@ -127,28 +145,25 @@ def train(cfg: dict) -> None:
     for epoch in range(1, int(train_cfg["epochs"]) + 1):
         pbar = tqdm(train_loader, desc=f"epoch {epoch}")
         for batch in pbar:
-            obs, action, next_obs, _ = batch
+            obs, past_actions, future_actions, next_obs, _ = batch
             obs = obs.to(device)
-            action = action.to(device)
+            past_actions = past_actions.to(device)
+            future_actions = future_actions.to(device)
             next_obs = next_obs.to(device)
 
             optimizer.zero_grad(set_to_none=True)
-            next_pred = model(obs, action)
+            logits = model(obs, future_actions, past_actions)
             last_frame = obs[:, -1:, :, :]
-            delta_gt = next_obs - last_frame
-            abs_delta = delta_gt.abs()
-            motion_mask = (abs_delta > 0.02).float()
-            weights = 1.0 + motion_weight * motion_mask
-            if train_cfg["loss"] == "huber":
-                base_loss = F.huber_loss(
-                    next_pred,
-                    next_obs,
-                    delta=float(train_cfg["delta"]),
-                    reduction="none",
-                )
-            else:
-                base_loss = (next_pred - next_obs) ** 2
-            loss = (weights * base_loss).mean()
+            motion = (next_obs - last_frame).abs() > motion_tau
+            motion = motion.float()
+            weights = 1.0 + motion_alpha * motion
+            weights = weights / weights.mean().clamp_min(1e-6)
+            loss_map = F.binary_cross_entropy_with_logits(
+                logits,
+                next_obs,
+                reduction="none",
+            )
+            loss = (weights * loss_map).mean()
 
             loss.backward()
             optimizer.step()
@@ -161,13 +176,24 @@ def train(cfg: dict) -> None:
                 append_csv(metrics_path, [epoch, global_step, float(loss.item())])
                 if wandb_run is not None:
                     wandb.log({"loss": float(loss.item()), "epoch": epoch}, step=global_step)
+                pred = torch.sigmoid(logits)
                 log_prediction_image(
                     tag="train",
                     step=global_step,
                     obs=obs,
-                    next_pred=next_pred,
+                    next_pred=pred,
                     image_dir=image_dir,
                     wandb_run=wandb_run,
+                )
+            if global_step < int(train_cfg.get("debug_steps", 5)):
+                pred = torch.sigmoid(logits)
+                print(
+                    "debug",
+                    f"step={global_step}",
+                    f"motion_mean={float(motion.mean().item()):.6f}",
+                    f"loss={float(loss.item()):.6f}",
+                    f"logits_abs_mean={float(logits.abs().mean().item()):.6f}",
+                    f"pred_mean={float(pred.mean().item()):.6f}",
                 )
             if val_loader is not None and int(train_cfg["val_every_steps"]) > 0:
                 if global_step % int(train_cfg["val_every_steps"]) == 0:
@@ -175,9 +201,8 @@ def train(cfg: dict) -> None:
                         model=model,
                         loader=val_loader,
                         device=device,
-                        loss_name=str(train_cfg["loss"]),
-                        delta=float(train_cfg["delta"]),
-                        motion_weight=motion_weight,
+                        motion_tau=motion_tau,
+                        motion_alpha=motion_alpha,
                     )
                     append_csv(val_metrics_path, [global_step, val_loss])
                     if wandb_run is not None:
@@ -210,6 +235,13 @@ def train(cfg: dict) -> None:
             "optimizer": optimizer.state_dict(),
             "epoch": epoch,
             "global_step": global_step,
+            "model_cfg": {
+                "n_past_frames": data_cfg.n_past_frames,
+                "n_past_actions": data_cfg.n_past_actions,
+                "n_future_frames": data_cfg.n_future_frames,
+                "action_embed_dim": action_embed_dim,
+                "width_mult": width_mult,
+            },
         }
         torch.save(ckpt, ckpt_dir / f"ckpt_epoch_{epoch}.pt")
         torch.save(ckpt, Path(run_dir) / "ckpt.pt")

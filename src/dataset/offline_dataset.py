@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Dataset and DataLoader utilities for sharded offline Atari transitions."""
+"""Dataset and DataLoader utilities for sharded offline Atari sequences."""
 
 import bisect
 from dataclasses import dataclass
@@ -20,6 +20,7 @@ class Manifest:
     """In-memory representation of the dataset manifest.json."""
     game: str
     steps: int
+    seq_len: int
     shards: List[Dict[str, Any]]
     total: int
 
@@ -27,19 +28,49 @@ class Manifest:
 class OfflineAtariDataset(Dataset):
     """Read sharded NPY offline dataset via memory-mapped arrays."""
 
-    def __init__(self, data_dir: str | Path):
+    def __init__(
+        self,
+        data_dir: str | Path,
+        *,
+        n_past_frames: int,
+        n_past_actions: int,
+        n_future_frames: int,
+    ):
         """Load the manifest and build shard index."""
         self.data_dir = Path(data_dir)
         manifest_path = self.data_dir / "manifest.json"
         if not manifest_path.exists():
             raise FileNotFoundError(f"Manifest not found at {manifest_path}")
         raw = read_json(manifest_path)
+        if "seq_len" not in raw:
+            raise KeyError("manifest.json missing required key 'seq_len'")
         self.manifest = Manifest(
             game=raw.get("game", ""),
             steps=raw.get("steps", 0),
+            seq_len=int(raw.get("seq_len", 0)),
             shards=raw.get("shards", []),
             total=raw.get("total", 0),
         )
+        self.seq_len = int(self.manifest.seq_len)
+        if self.seq_len <= 0:
+            raise ValueError("seq_len must be a positive integer")
+
+        self.n_past_frames = int(n_past_frames)
+        self.n_past_actions = int(n_past_actions)
+        self.n_future_frames = int(n_future_frames)
+        if self.n_past_frames <= 0:
+            raise ValueError("n_past_frames must be > 0")
+        if self.n_future_frames <= 0:
+            raise ValueError("n_future_frames must be > 0")
+        if self.n_past_actions < 0:
+            raise ValueError("n_past_actions must be >= 0")
+        if self.n_past_actions > self.n_past_frames - 1:
+            raise ValueError("n_past_actions must be <= n_past_frames - 1")
+        if self.n_past_frames + self.n_future_frames > self.seq_len:
+            raise ValueError(
+                "n_past_frames + n_future_frames must be <= seq_len "
+                f"(got {self.n_past_frames + self.n_future_frames} > {self.seq_len})"
+            )
 
         self.shard_entries = list(self.manifest.shards)
         self.shard_sizes = [int(s["count"]) for s in self.shard_entries]
@@ -49,7 +80,7 @@ class OfflineAtariDataset(Dataset):
         self._cache = None
 
     def __len__(self) -> int:
-        """Total number of transitions in the dataset."""
+        """Total number of sequences in the dataset."""
         return int(self.manifest.total)
 
     def _load_shard(self, shard_idx: int):
@@ -58,10 +89,11 @@ class OfflineAtariDataset(Dataset):
             return self._cache
         shard = self.shard_entries[shard_idx]
         # np.load(..., mmap_mode="r") keeps arrays on disk; slicing pulls only one sample.
+        if "frames" not in shard or "actions" not in shard:
+            raise KeyError("Shard is missing 'frames' or 'actions' entries")
         cached = {
-            "obs": np.load(self.data_dir / shard["obs"], mmap_mode="r"),
-            "next_obs": np.load(self.data_dir / shard["next_obs"], mmap_mode="r"),
-            "action": np.load(self.data_dir / shard["action"], mmap_mode="r"),
+            "frames": np.load(self.data_dir / shard["frames"], mmap_mode="r"),
+            "actions": np.load(self.data_dir / shard["actions"], mmap_mode="r"),
             "done": np.load(self.data_dir / shard["done"], mmap_mode="r"),
         }
         # Memmaps are lightweight handles; replacing the cache lets GC close old files naturally.
@@ -77,29 +109,37 @@ class OfflineAtariDataset(Dataset):
         return shard_idx, local_idx
 
     def __getitem__(self, index: int):
-        """Return (obs_stack, action, next_obs, done) as torch tensors."""
+        """Return (past_frames, past_actions, future_actions, future_frames, done) tensors."""
         if index < 0 or index >= len(self):
             raise IndexError(index)
         shard_idx, local_idx = self._get_shard_index(index)
         data = self._load_shard(shard_idx)
-        obs = data["obs"][local_idx]
-        next_obs = data["next_obs"][local_idx]
-        action = data["action"][local_idx]
+        frames = data["frames"][local_idx]
+        actions = data["actions"][local_idx]
         done = data["done"][local_idx]
 
-        if obs.dtype == np.uint8:
-            obs = obs.astype(np.float32) * np.float32(1.0 / 255.0)
+        if frames.dtype == np.uint8:
+            frames = frames.astype(np.float32) * np.float32(1.0 / 255.0)
         else:
-            obs = obs.astype(np.float32, copy=False)
-        if next_obs.dtype == np.uint8:
-            next_obs = next_obs.astype(np.float32) * np.float32(1.0 / 255.0)
+            frames = frames.astype(np.float32, copy=False)
+
+        past_frames = frames[: self.n_past_frames]
+        future_frames = frames[
+            self.n_past_frames : self.n_past_frames + self.n_future_frames
+        ]
+        pivot = self.n_past_frames - 1
+        # actions[i] corresponds to the transition from frames[i] -> frames[i+1]
+        if self.n_past_actions == 0:
+            past_actions = actions[:0]
         else:
-            next_obs = next_obs.astype(np.float32, copy=False)
+            past_actions = actions[pivot - self.n_past_actions : pivot]
+        future_actions = actions[pivot : pivot + self.n_future_frames]
 
         return (
-            torch.from_numpy(obs),
-            torch.as_tensor(action, dtype=torch.int64),
-            torch.from_numpy(next_obs),
+            torch.from_numpy(past_frames),
+            torch.as_tensor(past_actions, dtype=torch.int64),
+            torch.as_tensor(future_actions, dtype=torch.int64),
+            torch.from_numpy(future_frames),
             torch.as_tensor(done, dtype=torch.bool),
         )
 
@@ -112,7 +152,12 @@ def create_dataloader(
 ) -> DataLoader:
     """Create a DataLoader for the offline Atari dataset."""
     return _build_loader(
-        dataset=OfflineAtariDataset(data_cfg.data_dir),
+        dataset=OfflineAtariDataset(
+            data_cfg.data_dir,
+            n_past_frames=data_cfg.n_past_frames,
+            n_past_actions=data_cfg.n_past_actions,
+            n_future_frames=data_cfg.n_future_frames,
+        ),
         data_cfg=data_cfg,
         shuffle=shuffle,
         drop_last=drop_last,
@@ -127,7 +172,12 @@ def create_train_val_loaders(
     drop_last_val: bool = False,
 ) -> tuple[DataLoader, DataLoader | None]:
     """Create train/val DataLoaders from a single dataset split."""
-    dataset = OfflineAtariDataset(data_cfg.data_dir)
+    dataset = OfflineAtariDataset(
+        data_cfg.data_dir,
+        n_past_frames=data_cfg.n_past_frames,
+        n_past_actions=data_cfg.n_past_actions,
+        n_future_frames=data_cfg.n_future_frames,
+    )
     if data_cfg.val_ratio <= 0.0:
         return _build_loader(dataset, data_cfg, shuffle=True, drop_last=drop_last_train), None
 

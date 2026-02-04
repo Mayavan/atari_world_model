@@ -59,7 +59,12 @@ class FrameStack(gym.Wrapper):
         return np.stack(self.frames, axis=0)
 
 
-def make_atari_env(game: str, seed: Optional[int] = None, render_mode: Optional[str] = None) -> gym.Env:
+def make_atari_env(
+    game: str,
+    seed: Optional[int] = None,
+    render_mode: Optional[str] = None,
+    frame_stack: int = 4,
+) -> gym.Env:
     """Create a preprocessed Gymnasium Atari environment."""
     import ale_py  # noqa: F401
     gym.register_envs(ale_py)
@@ -81,7 +86,7 @@ def make_atari_env(game: str, seed: Optional[int] = None, render_mode: Optional[
     env = GrayscaleObservation(env, keep_dim=False)
     env = ResizeObservation(env, shape=(84, 84))
     env = FloatNormalize(env)
-    env = FrameStack(env, k=4)
+    env = FrameStack(env, k=frame_stack)
 
     if seed is not None:
         try:

@@ -7,7 +7,8 @@ experiment:
     entity: mayavan-projects
     mode: online
 
-model: {}
+model:
+  width_mult: 2.0
 
 optimizer: {}
 
@@ -28,13 +29,19 @@ data:
   persistent_workers: true
   pin_memory: true
   val_ratio: 0.1
+  n_past_frames: 4
+  n_past_actions: 3
+  n_future_frames: 4
 
 train:
   epochs: 5
   max_steps: 0
-  loss: huber
+  loss: bce_logits
   delta: 1.0
   motion_weight: 10.0
+  motion_tau: 0.02
+  motion_alpha: 10.0
+  debug_steps: 5
   log_every: 500
   val_every_steps: 1000
   val_rollout_enabled: true
