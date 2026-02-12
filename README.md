@@ -1,6 +1,6 @@
-# Atari Action-Conditioned World Model (Offline)
+# Action-Conditioned World Model (Offline)
 
-Offline next-frame prediction world model for Atari using Gymnasium and PyTorch. This repo provides a full runnable scaffold with dataset generation, training, and evaluation (including videos and plots). The core modeling logic can be swapped later.
+Offline next-frame prediction world model using Gymnasium and PyTorch. This repo provides a full runnable scaffold with dataset generation, training, and evaluation (including videos and plots). The current environment setup uses Procgen, but core modeling logic is environment-agnostic.
 
 ## Setup
 
@@ -14,19 +14,11 @@ Later, you can activate with:
 ./scripts/activate_venv.sh
 ```
 
-### ROMs
-Gymnasium with Atari support is already included in dependencies. You still need to download ROMs once using AutoROM:
-
-```bash
-AutoROM --accept-license
-```
-
-
 ## Commands
 
 Generate dataset (random policy):
 ```bash
-python -m src.dataset.generate_dataset --game Pong --steps 300000 --out_dir data/pong
+python -m src.dataset.generate_dataset --game coinrun --steps 300000 --out_dir data/coinrun
 ```
 
 Train (uses `config.yaml`):
@@ -41,7 +33,7 @@ python -m src.train optimizer.lr=1e-4 train.max_steps=5
 
 Evaluate:
 ```bash
-python -m src.eval --checkpoint runs/.../ckpt.pt --game Pong
+python -m src.eval --checkpoint runs/.../ckpt.pt --game coinrun
 ```
 
 ### Weights & Biases
@@ -50,19 +42,19 @@ Enable W&B logging for training and evaluation:
 ```bash
 wandb login
 python -m src.train
-python -m src.eval --checkpoint runs/.../ckpt.pt --game Pong
+python -m src.eval --checkpoint runs/.../ckpt.pt --game coinrun
 ```
 
 To disable logging:
 ```bash
 python -m src.train experiment.wandb.mode=disabled
-python -m src.eval --checkpoint runs/.../ckpt.pt --game Pong --wandb_mode disabled
+python -m src.eval --checkpoint runs/.../ckpt.pt --game coinrun --wandb_mode disabled
 ```
 
 ## Expected outputs
 
-- Dataset shards: `data/pong/shard_*_{obs,next_obs,action,done}.npy`
-- Manifest: `data/pong/manifest.json`
+- Dataset shards: `data/coinrun/shard_*_{frames,actions,done}.npy`
+- Manifest: `data/coinrun/manifest.json`
 - Training run: `runs/<timestamp>_<game>/metrics.csv`, `runs/<timestamp>_<game>/val_metrics.csv`, `runs/<timestamp>_<game>/images/`, `runs/<timestamp>_<game>/videos/`, `runs/<timestamp>_<game>/checkpoints/`, `runs/<timestamp>_<game>/resolved_config.yaml`
 - Eval artifacts: `runs/<timestamp>_<game>_eval/videos/` (MP4 + GIF), `runs/<timestamp>_<game>_eval/plots/mse_vs_horizon.png`
 

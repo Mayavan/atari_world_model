@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""CLI for generating offline Atari sequence shards from a random policy."""
+"""CLI for generating offline sequence shards from a random policy."""
 
 import argparse
 from collections import deque
@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 from tqdm import tqdm
 
-from src.envs.atari_wrappers import make_atari_env
+from src.envs.procgen_wrappers import make_procgen_env
 from src.utils.io import ensure_dir, write_json
 from src.utils.seed import set_seed
 
@@ -72,7 +72,7 @@ def generate_dataset(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     out_dir = ensure_dir(args.out_dir)
 
-    env = make_atari_env(args.game, seed=args.seed, frame_stack=1)
+    env = make_procgen_env(args.game, seed=args.seed, frame_stack=1)
 
     obs, _ = env.reset(seed=args.seed)
     if obs.ndim == 3:
@@ -205,8 +205,8 @@ def generate_dataset(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     """Define CLI arguments for dataset generation."""
-    p = argparse.ArgumentParser(description="Generate offline Atari dataset from random policy")
-    p.add_argument("--game", type=str, required=True, help="Atari game name (e.g., Pong)")
+    p = argparse.ArgumentParser(description="Generate offline Procgen dataset from random policy")
+    p.add_argument("--game", type=str, required=True, help="Procgen game name (e.g., coinrun)")
     p.add_argument("--steps", type=int, default=300_000, help="Number of transitions to collect")
     p.add_argument("--out_dir", type=str, default="data", help="Output directory")
     p.add_argument("--shard_size", type=int, default=50_000, help="Sequences per shard")

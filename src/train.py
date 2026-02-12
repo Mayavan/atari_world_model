@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Training loop for the Atari world model."""
+"""Training loop for the world model."""
 
 import sys
 from pathlib import Path
@@ -12,7 +12,7 @@ import wandb
 
 from src.config import apply_overrides, load_config, save_config, validate_data_config
 from src.dataset.offline_dataset import create_train_val_loaders
-from src.envs.atari_wrappers import make_atari_env
+from src.envs.procgen_wrappers import make_procgen_env
 from src.models.world_model import WorldModel
 from src.utils.io import ensure_dir, init_csv, append_csv, timestamp_dir
 from src.utils.seed import set_seed
@@ -59,7 +59,7 @@ def train(cfg: dict) -> None:
 
     save_config(cfg, Path(run_dir) / "resolved_config.yaml")
 
-    env = make_atari_env(
+    env = make_procgen_env(
         data_cfg.game,
         seed=int(experiment["seed"]),
         frame_stack=data_cfg.n_past_frames,
@@ -91,7 +91,7 @@ def train(cfg: dict) -> None:
     )
     val_env = None
     if val_rollout_ready:
-        val_env = make_atari_env(
+        val_env = make_procgen_env(
             data_cfg.game,
             seed=int(experiment["seed"]),
             frame_stack=data_cfg.n_past_frames,

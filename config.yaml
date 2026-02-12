@@ -1,9 +1,9 @@
 experiment:
-  name: pong
+  name: coinrun
   seed: 0
   run_dir: ""
   wandb:
-    project: atari_world_model
+    project: world_model
     entity: mayavan-projects
     mode: online
 
@@ -21,8 +21,8 @@ scheduler:
   final_div_factor: 10000.0
 
 data:
-  data_dir: data/pong
-  game: Pong
+  data_dir: data/coinrun
+  game: coinrun
   batch_size: 128
   num_workers: 2
   prefetch_factor: 2

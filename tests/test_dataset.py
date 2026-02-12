@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.dataset.offline_dataset import OfflineAtariDataset
+from src.dataset.offline_dataset import OfflineDataset
 
 
 def test_dataset_shapes_and_dtypes(tmp_path: Path):
@@ -40,7 +40,7 @@ def test_dataset_shapes_and_dtypes(tmp_path: Path):
     with open(tmp_path / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f)
 
-    ds = OfflineAtariDataset(
+    ds = OfflineDataset(
         tmp_path,
         n_past_frames=4,
         n_past_actions=3,

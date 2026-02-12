@@ -1,1 +1,1 @@
-"""Atari world model package."""
+"""World model package."""

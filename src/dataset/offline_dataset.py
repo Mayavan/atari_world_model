@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Dataset and DataLoader utilities for sharded offline Atari sequences."""
+"""Dataset and DataLoader utilities for sharded offline sequences."""
 
 import bisect
 from dataclasses import dataclass
@@ -25,7 +25,7 @@ class Manifest:
     total: int
 
 
-class OfflineAtariDataset(Dataset):
+class OfflineDataset(Dataset):
     """Read sharded NPY offline dataset via memory-mapped arrays."""
 
     def __init__(
@@ -150,9 +150,9 @@ def create_dataloader(
     shuffle: bool = True,
     drop_last: bool = True,
 ) -> DataLoader:
-    """Create a DataLoader for the offline Atari dataset."""
+    """Create a DataLoader for the offline dataset."""
     return _build_loader(
-        dataset=OfflineAtariDataset(
+        dataset=OfflineDataset(
             data_cfg.data_dir,
             n_past_frames=data_cfg.n_past_frames,
             n_past_actions=data_cfg.n_past_actions,
@@ -172,7 +172,7 @@ def create_train_val_loaders(
     drop_last_val: bool = False,
 ) -> tuple[DataLoader, DataLoader | None]:
     """Create train/val DataLoaders from a single dataset split."""
-    dataset = OfflineAtariDataset(
+    dataset = OfflineDataset(
         data_cfg.data_dir,
         n_past_frames=data_cfg.n_past_frames,
         n_past_actions=data_cfg.n_past_actions,

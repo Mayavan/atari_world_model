@@ -13,7 +13,7 @@ import torch
 from tqdm import tqdm
 import wandb
 
-from src.envs.atari_wrappers import make_atari_env
+from src.envs.procgen_wrappers import make_procgen_env
 from src.models.world_model import WorldModel
 from src.utils.io import ensure_dir, timestamp_dir, init_csv, append_csv
 from src.utils.video import side_by_side, save_gif, save_video_mp4
@@ -111,7 +111,7 @@ def evaluate(args: argparse.Namespace) -> None:
     action_embed_dim = int(model_cfg.get("action_embed_dim", 64))
     width_mult = float(model_cfg.get("width_mult", 1.0))
 
-    env = make_atari_env(args.game, seed=args.seed, frame_stack=n_past_frames)
+    env = make_procgen_env(args.game, seed=args.seed, frame_stack=n_past_frames)
     num_actions = env.action_space.n
 
     model = WorldModel(
@@ -194,7 +194,7 @@ def evaluate(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     """Define CLI arguments for evaluation."""
-    p = argparse.ArgumentParser(description="Evaluate Atari world model")
+    p = argparse.ArgumentParser(description="Evaluate world model")
     p.add_argument("--checkpoint", type=str, required=True)
     p.add_argument("--game", type=str, required=True)
     p.add_argument("--episodes", type=int, default=5)
@@ -202,7 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--cpu", action="store_true", help="Force CPU execution")
-    p.add_argument("--wandb_project", type=str, default="atari_world_model")
+    p.add_argument("--wandb_project", type=str, default="world_model")
     p.add_argument("--wandb_entity", type=str, default="mayavan-projects")
     p.add_argument(
         "--wandb_mode",
