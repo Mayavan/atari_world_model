@@ -14,14 +14,15 @@ from tqdm import tqdm
 import wandb
 
 from src.envs.procgen_wrappers import make_procgen_env
-from src.models.world_model import WorldModel
+from src.models.registry import build_model_from_checkpoint_cfg
+from src.utils.contracts import validate_rollout_prediction, validate_rollout_stack
 from src.utils.io import ensure_dir, timestamp_dir, init_csv, append_csv
 from src.utils.video import side_by_side, save_gif, save_video_mp4
 from src.utils.seed import set_seed
 
 
 def rollout_open_loop(
-    model: WorldModel,
+    model: torch.nn.Module,
     env,
     horizon: int,
     device: torch.device,
@@ -35,6 +36,7 @@ def rollout_open_loop(
 
     # Build a real input stack with actual actions (no zero padding).
     pred_stack = obs[-n_past_frames:].copy()
+    validate_rollout_stack(pred_stack=pred_stack, n_past_frames=n_past_frames)
     action_history: list[int] = []
     warmup_needed = max(0, n_past_frames - 1)
     while len(action_history) < warmup_needed:
@@ -63,6 +65,12 @@ def rollout_open_loop(
 
         with torch.no_grad():
             logits = model(obs_t, future_t, past_t)
+            validate_rollout_prediction(
+                logits=logits,
+                n_future_frames=n_future_frames,
+                height=pred_stack.shape[1],
+                width=pred_stack.shape[2],
+            )
             pred = torch.sigmoid(logits)
         next_frame = pred[:, 0].squeeze(0).cpu().numpy()
         pred_frame = next_frame
@@ -106,22 +114,11 @@ def evaluate(args: argparse.Namespace) -> None:
     ckpt = torch.load(args.checkpoint, map_location=device)
     model_cfg = ckpt.get("model_cfg", {})
     n_past_frames = int(model_cfg.get("n_past_frames", 4))
-    n_past_actions = int(model_cfg.get("n_past_actions", 0))
-    n_future_frames = int(model_cfg.get("n_future_frames", 1))
-    action_embed_dim = int(model_cfg.get("action_embed_dim", 64))
-    width_mult = float(model_cfg.get("width_mult", 1.0))
 
     env = make_procgen_env(args.game, seed=args.seed, frame_stack=n_past_frames)
     num_actions = env.action_space.n
 
-    model = WorldModel(
-        num_actions=num_actions,
-        n_past_frames=n_past_frames,
-        n_past_actions=n_past_actions,
-        n_future_frames=n_future_frames,
-        action_embed_dim=action_embed_dim,
-        width_mult=width_mult,
-    )
+    model = build_model_from_checkpoint_cfg(model_cfg=model_cfg, num_actions=num_actions)
     model.load_state_dict(ckpt["model"])
     model.to(device)
     model.eval()

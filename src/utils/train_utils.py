@@ -12,6 +12,12 @@ import torch
 import torch.nn.functional as F
 import wandb
 
+from src.utils.contracts import (
+    validate_model_output,
+    validate_rollout_prediction,
+    validate_rollout_stack,
+    validate_supervised_batch,
+)
 from src.utils.video import save_video_mp4, side_by_side
 
 
@@ -42,9 +48,18 @@ def run_validation(
             past_actions = past_actions.to(device)
             future_actions = future_actions.to(device)
             next_obs = next_obs.to(device)
+            validate_supervised_batch(
+                obs=obs,
+                past_actions=past_actions,
+                future_actions=future_actions,
+                next_obs=next_obs,
+                n_past_frames=int(getattr(model, "n_past_frames", obs.shape[1])),
+                n_past_actions=int(getattr(model, "n_past_actions", past_actions.shape[1])),
+                n_future_frames=int(getattr(model, "n_future_frames", next_obs.shape[1])),
+            )
             logits = model(obs, future_actions, past_actions)
             last_frame = obs[:, -1:, :, :]
-            assert logits.shape == next_obs.shape, "logits must match next_obs shape"
+            validate_model_output(logits=logits, next_obs=next_obs)
             motion = (next_obs - last_frame).abs() > motion_tau
             motion = motion.float()
             motion = F.max_pool2d(
@@ -141,6 +156,7 @@ def run_rollout_video(
 
     # Build a real input stack with actual actions (no zero padding).
     pred_stack = obs[-n_past_frames:].copy()
+    validate_rollout_stack(pred_stack=pred_stack, n_past_frames=n_past_frames)
     action_history: list[int] = []
     warmup_needed = max(0, n_past_frames - 1)
     while len(action_history) < warmup_needed:
@@ -166,6 +182,12 @@ def run_rollout_video(
             future_t = torch.tensor([future_actions], device=device, dtype=torch.int64)
             past_t = torch.tensor([list(past_actions)], device=device, dtype=torch.int64)
             logits = model(obs_t, future_t, past_t)
+            validate_rollout_prediction(
+                logits=logits,
+                n_future_frames=n_future_frames,
+                height=pred_stack.shape[1],
+                width=pred_stack.shape[2],
+            )
             pred = torch.sigmoid(logits)
             next_frame = pred[:, 0].squeeze(0).cpu().numpy()
             pred_frame = next_frame

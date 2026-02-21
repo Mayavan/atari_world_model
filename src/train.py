@@ -13,9 +13,10 @@ import wandb
 from src.config import apply_overrides, load_config, save_config, validate_data_config
 from src.dataset.offline_dataset import create_train_val_loaders
 from src.envs.procgen_wrappers import make_procgen_env
-from src.models.world_model import WorldModel
+from src.models.registry import build_model_from_config
 from src.utils.io import ensure_dir, init_csv, append_csv, timestamp_dir
 from src.utils.seed import set_seed
+from src.utils.contracts import validate_model_output, validate_supervised_batch
 from src.utils.train_utils import (
     log_prediction_image,
     parse_train_cli,
@@ -69,7 +70,6 @@ def train(cfg: dict) -> None:
 
     force_cpu = bool(train_cfg.get("cpu", False))
     device = torch.device("cuda" if torch.cuda.is_available() and not force_cpu else "cpu")
-    use_cuda = device.type == "cuda"
     train_loader, val_loader = create_train_val_loaders(
         data_cfg,
         seed=int(experiment["seed"]),
@@ -98,15 +98,12 @@ def train(cfg: dict) -> None:
         )
 
     model_cfg = cfg.get("model", {})
-    width_mult = float(model_cfg.get("width_mult", 1.0))
-    action_embed_dim = int(model_cfg.get("action_embed_dim", 64))
-    model = WorldModel(
+    model, ckpt_model_cfg = build_model_from_config(
+        model_cfg=model_cfg,
         num_actions=num_actions,
         n_past_frames=data_cfg.n_past_frames,
         n_past_actions=data_cfg.n_past_actions,
         n_future_frames=data_cfg.n_future_frames,
-        action_embed_dim=action_embed_dim,
-        width_mult=width_mult,
     )
     model.to(device)
 
@@ -153,9 +150,19 @@ def train(cfg: dict) -> None:
             past_actions = past_actions.to(device)
             future_actions = future_actions.to(device)
             next_obs = next_obs.to(device)
+            validate_supervised_batch(
+                obs=obs,
+                past_actions=past_actions,
+                future_actions=future_actions,
+                next_obs=next_obs,
+                n_past_frames=data_cfg.n_past_frames,
+                n_past_actions=data_cfg.n_past_actions,
+                n_future_frames=data_cfg.n_future_frames,
+            )
 
             optimizer.zero_grad(set_to_none=True)
             logits = model(obs, future_actions, past_actions)
+            validate_model_output(logits=logits, next_obs=next_obs)
             last_frame = obs[:, -1:, :, :]
             motion = (next_obs - last_frame).abs() > motion_tau
             motion = motion.float()
@@ -235,13 +242,7 @@ def train(cfg: dict) -> None:
             "optimizer": optimizer.state_dict(),
             "epoch": epoch,
             "global_step": global_step,
-            "model_cfg": {
-                "n_past_frames": data_cfg.n_past_frames,
-                "n_past_actions": data_cfg.n_past_actions,
-                "n_future_frames": data_cfg.n_future_frames,
-                "action_embed_dim": action_embed_dim,
-                "width_mult": width_mult,
-            },
+            "model_cfg": ckpt_model_cfg,
         }
         torch.save(ckpt, ckpt_dir / f"ckpt_epoch_{epoch}.pt")
         torch.save(ckpt, Path(run_dir) / "ckpt.pt")

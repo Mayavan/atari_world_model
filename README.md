@@ -33,7 +33,7 @@ python -m src.train
 
 Override config values with dot notation:
 ```bash
-python -m src.train optimizer.lr=1e-4 train.max_steps=5
+python -m src.train model.type=pixel_world_model train.max_steps=5
 ```
 
 Evaluate:

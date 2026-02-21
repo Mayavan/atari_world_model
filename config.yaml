@@ -8,6 +8,8 @@ experiment:
     mode: online
 
 model:
+  type: pixel_world_model
+  action_embed_dim: 64
   width_mult: 1.0
 
 optimizer: {}
