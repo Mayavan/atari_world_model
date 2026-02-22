@@ -23,11 +23,15 @@ from src.utils.contracts import (
 from src.utils.video import save_video_mp4, side_by_side
 
 
-def parse_train_cli(argv: list[str]) -> tuple[Path, list[str]]:
+def parse_train_cli(
+    argv: list[str],
+    *,
+    default_config: str | Path = "config.yaml",
+) -> tuple[Path, list[str]]:
     """Parse CLI args into (config_path, overrides)."""
     if len(argv) >= 2 and argv[1].endswith((".yaml", ".yml")):
         return Path(argv[1]), argv[2:]
-    return Path("config.yaml"), argv[1:]
+    return Path(default_config), argv[1:]
 
 
 def run_validation(

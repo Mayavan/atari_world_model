@@ -84,6 +84,43 @@ The intent is incremental modernization with measurable checkpoints, not a full 
 - Artifacts:
   - Side-by-side GT|prediction videos (MP4/GIF), horizon plot, CSV.
 
+### 2.7 Deterministic Conv Autoencoder (Implemented)
+- Model file: `src/models/conv_autoencoder.py`.
+- Class: `ConvAutoencoder`.
+- Architecture:
+  - Strided-conv encoder with configurable downsample factor (`8` or `16`).
+  - Spatial latent via a `1x1` conv head (`latent_head`).
+  - Symmetric decoder with configurable upsampling path:
+    - `upsample_conv` or `conv_transpose`.
+  - Output uses sigmoid and is bounded in `[0,1]`.
+- Interface:
+  - `encode(x) -> z`
+  - `decode(z) -> recon`
+  - `forward(x) -> recon`
+
+### 2.8 Autoencoder Training Path (Implemented)
+- Entrypoint: `src/train_autoencoder.py` with config `config_autoencoder.yaml`.
+- Optimization:
+  - AdamW.
+  - Gradient clipping.
+  - FP32-only training and validation (AMP/autocast disabled by design).
+- Loss:
+  - Fixed reconstruction loss: Huber (`delta=1.0`).
+  - Variance regularizer on latent statistics:
+    - `var_reg_loss = var_reg_lambda * (Var(z) - var_target)^2`
+    - Default `var_target=1.0` to keep latent variance calibrated rather than unbounded growth.
+  - No alternative reconstruction-loss modes.
+- Validation:
+  - Reconstruction metrics: loss/MSE/PSNR/SSIM.
+  - Latent diagnostics:
+    - `val_latent_var` (mean latent variance over batch)
+    - `val_latent_mean_norm` (mean L2 norm of latent vectors)
+  - Logs reconstruction grids (target vs recon).
+- Logging and artifacts:
+  - CSV metrics + optional W&B.
+  - Checkpoints: latest, per-epoch, and best-val checkpoint.
+  - Resume supported from checkpoint.
+
 ## 3. Current Strengths and Gaps
 
 ### Strengths
@@ -93,7 +130,7 @@ The intent is incremental modernization with measurable checkpoints, not a full 
 - Reproducible config-driven workflow and basic test coverage.
 
 ### Gaps vs modern latent video models
-- Pixel-space prediction only (no learned latent compression).
+- Core predictive model is still pixel-space; latent autoencoder is not yet integrated into dynamics.
 - Deterministic decoder (limited multimodal/stochastic futures).
 - BCE on grayscale frames limits perceptual realism.
 - No temporal latent dynamics model beyond short action-conditioned mapping.
@@ -114,6 +151,7 @@ to:
 ### 4.2 Proposed components
 - `LatentEncoder` / `LatentDecoder`:
   - Compression to spatial latent map (e.g. 4x-16x downsample).
+  - Current repo baseline already includes a deterministic ConvAutoencoder.
 - `LatentDynamicsConditioner`:
   - Encodes action history/future and optional past latents.
 - `FlowBackbone`:
@@ -138,13 +176,14 @@ Exit criteria:
 - Train/eval scripts can instantiate model by `model.type`.
 
 ### Phase 1: Introduce Latent Autoencoder (No Flow Yet)
-- Add `src/models/latent_autoencoder.py` with:
-  - `encode(frame_or_sequence) -> latent`
-  - `decode(latent) -> reconstructed_frame_or_sequence`
-- Train AE on existing dataset frames first (frame-wise, then short clips).
-- Add reconstruction metrics:
-  - MSE/PSNR/SSIM in addition to BCE.
-- Keep current world model unchanged; only add offline AE training/eval scripts.
+- Status: partially completed with deterministic ConvAutoencoder.
+- Implemented:
+  - `src/models/conv_autoencoder.py` with `encode/decode/forward`.
+  - `src/train_autoencoder.py` and `config_autoencoder.yaml`.
+  - Validation metrics include MSE/PSNR/SSIM and latent diagnostics.
+- Remaining for this phase:
+  - Add dedicated `eval_autoencoder.py` for standalone reconstruction/video eval if needed.
+  - Decide whether to keep deterministic AE only or add stochastic variants in a separate branch.
 
 Exit criteria:
 - Good reconstructions on validation videos.
@@ -233,9 +272,9 @@ Exit criteria:
 
 ## 8. Suggested Immediate Next Sprint (Concrete)
 1. Add model registry (`model.type: pixel_world_model | latent_ae | latent_predictor | latent_flow_stub`).
-2. Implement and train `latent_autoencoder.py` on current dataset frames.
-3. Add `eval_autoencoder.py` that writes recon videos + PSNR/SSIM.
+2. Train and benchmark existing `ConvAutoencoder` on current dataset frames.
+3. Add `eval_autoencoder.py` that writes recon videos + PSNR/SSIM/latent stats.
 4. Implement deterministic `latent_predictor.py` bridge and hook into existing rollout eval.
-5. Lock comparison table in README for baseline vs latent bridge.
+5. Lock comparison table in README for baseline world model vs latent bridge.
 
 This sequence minimizes risk while steadily moving toward a modern latent-flow video generator.
