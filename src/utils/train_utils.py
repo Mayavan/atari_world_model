@@ -12,6 +12,8 @@ import torch
 import torch.nn.functional as F
 import wandb
 
+from src.metrics.image_quality import compute_image_quality_metrics, compute_mse_psnr
+from src.metrics.rollout import save_rollout_metric_plot
 from src.utils.contracts import (
     validate_model_output,
     validate_rollout_prediction,
@@ -36,10 +38,13 @@ def run_validation(
     motion_tau: float,
     motion_weight: float,
     motion_dilate_px: int,
-) -> tuple[float, np.ndarray | None]:
-    """Evaluate the model on the validation loader and return average loss and viz."""
+) -> tuple[dict[str, float], np.ndarray | None]:
+    """Evaluate validation loss and image-quality metrics."""
     model.eval()
     total_loss = 0.0
+    total_mse = 0.0
+    total_psnr = 0.0
+    total_ssim = 0.0
     total_samples = 0
     viz_image = None
     with torch.no_grad():
@@ -76,16 +81,25 @@ def run_validation(
                 reduction="none",
             )
             loss = (weights * loss_map).mean()
+            pred = torch.sigmoid(logits)
+            batch_metrics = compute_image_quality_metrics(pred=pred, target=next_obs, data_range=1.0)
             if viz_image is None:
-                pred = torch.sigmoid(logits)
                 viz_image = build_viz_image(obs, pred)
             batch_size = int(obs.shape[0])
             total_loss += float(loss.item()) * batch_size
+            total_mse += batch_metrics["mse"] * batch_size
+            total_psnr += batch_metrics["psnr"] * batch_size
+            total_ssim += batch_metrics["ssim"] * batch_size
             total_samples += batch_size
     model.train()
     if total_samples == 0:
-        return 0.0, viz_image
-    return total_loss / total_samples, viz_image
+        return {"loss": 0.0, "mse": 0.0, "psnr": 0.0, "ssim": 0.0}, viz_image
+    return {
+        "loss": total_loss / total_samples,
+        "mse": total_mse / total_samples,
+        "psnr": total_psnr / total_samples,
+        "ssim": total_ssim / total_samples,
+    }, viz_image
 
 
 def build_viz_image(obs: torch.Tensor, next_pred: torch.Tensor) -> np.ndarray:
@@ -141,10 +155,11 @@ def run_rollout_video(
     fps: int,
     step: int,
     video_dir: Path,
+    plot_dir: Path,
     wandb_run,
     tag: str = "val_rollout",
-) -> Path | None:
-    """Run an open-loop rollout and save a side-by-side video."""
+) -> dict[str, object] | None:
+    """Run an open-loop rollout, save video/plot, and return rollout metrics."""
     if horizon <= 0:
         return None
     was_training = model.training
@@ -171,6 +186,9 @@ def run_rollout_video(
     past_actions = deque(action_history[-n_past_actions:], maxlen=n_past_actions)
 
     frames: list[np.ndarray] = []
+    horizons: list[int] = []
+    mse_by_horizon: list[float] = []
+    psnr_by_horizon: list[float] = []
     # First frame: last input frame on both sides (gt|pred format).
     last_input = pred_stack[-1]
     frames.append(side_by_side(last_input, last_input))
@@ -195,6 +213,14 @@ def run_rollout_video(
             next_obs, _, terminated, truncated, _ = env.step(action)
             gt_frame = next_obs[-1]
             frames.append(side_by_side(gt_frame, pred_frame))
+            mse, psnr = compute_mse_psnr(
+                pred=torch.from_numpy(pred_frame).to(device=device, dtype=torch.float32),
+                target=torch.from_numpy(gt_frame).to(device=device, dtype=torch.float32),
+                data_range=1.0,
+            )
+            horizons.append(len(horizons) + 1)
+            mse_by_horizon.append(mse)
+            psnr_by_horizon.append(psnr)
 
             pred_stack = np.concatenate([pred_stack[1:], pred_frame[None, ...]], axis=0)
             if n_past_actions > 0:
@@ -207,8 +233,27 @@ def run_rollout_video(
 
     if not frames:
         return None
-    path = video_dir / f"{tag}_step_{step:08d}.mp4"
-    save_video_mp4(frames, path, fps=fps)
+    video_path = video_dir / f"{tag}_step_{step:08d}.mp4"
+    save_video_mp4(frames, video_path, fps=fps)
+    plot_path = plot_dir / f"{tag}_metrics_step_{step:08d}.png"
+    save_rollout_metric_plot(
+        horizons=horizons,
+        mse_values=mse_by_horizon,
+        psnr_values=psnr_by_horizon,
+        out_path=plot_path,
+        title=f"Validation rollout metrics (step {step})",
+    )
     if wandb_run is not None:
-        wandb.log({tag: wandb.Video(str(path), fps=fps, format="mp4")}, step=step)
-    return path
+        wandb.log({tag: wandb.Video(str(video_path), fps=fps, format="mp4")}, step=step)
+        wandb.log({f"{tag}_metrics": wandb.Image(str(plot_path))}, step=step)
+    return {
+        "video_path": video_path,
+        "plot_path": plot_path,
+        "horizons": horizons,
+        "mse_by_horizon": mse_by_horizon,
+        "psnr_by_horizon": psnr_by_horizon,
+        "final_mse": mse_by_horizon[-1] if mse_by_horizon else 0.0,
+        "final_psnr": psnr_by_horizon[-1] if psnr_by_horizon else 0.0,
+        "mean_mse": float(np.mean(mse_by_horizon)) if mse_by_horizon else 0.0,
+        "mean_psnr": float(np.mean(psnr_by_horizon)) if psnr_by_horizon else 0.0,
+    }

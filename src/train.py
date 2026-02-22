@@ -77,7 +77,7 @@ def train(cfg: dict) -> None:
         drop_last_val=False,
     )
     val_rollout_enabled = bool(train_cfg.get("val_rollout_enabled", True))
-    val_rollout_horizon = int(train_cfg.get("val_rollout_horizon", 30))
+    val_rollout_horizon = int(train_cfg.get("val_rollout_horizon", 32))
     val_rollout_fps = int(train_cfg.get("val_rollout_fps", 30))
     motion_tau = float(train_cfg.get("motion_tau", 0.02))
     motion_weight = float(train_cfg.get("motion_weight", 10.0))
@@ -133,11 +133,15 @@ def train(cfg: dict) -> None:
     ckpt_dir = ensure_dir(Path(run_dir) / "checkpoints")
     image_dir = ensure_dir(Path(run_dir) / "images")
     video_dir = ensure_dir(Path(run_dir) / "videos")
+    plot_dir = ensure_dir(Path(run_dir) / "plots")
     metrics_path = Path(run_dir) / "metrics.csv"
     init_csv(metrics_path, ["epoch", "step", "loss"])
     val_metrics_path = Path(run_dir) / "val_metrics.csv"
+    rollout_metrics_path = Path(run_dir) / "val_rollout_metrics.csv"
     if val_loader is not None and int(train_cfg["val_every_steps"]) > 0:
-        init_csv(val_metrics_path, ["step", "val_loss"])
+        init_csv(val_metrics_path, ["step", "val_loss", "val_mse", "val_psnr", "val_ssim"])
+        if val_rollout_ready:
+            init_csv(rollout_metrics_path, ["step", "horizon", "mse", "psnr"])
 
     global_step = 0
     model.train()
@@ -203,7 +207,7 @@ def train(cfg: dict) -> None:
                 )
             if val_loader is not None and int(train_cfg["val_every_steps"]) > 0:
                 if global_step % int(train_cfg["val_every_steps"]) == 0:
-                    val_loss, val_viz = run_validation(
+                    val_metrics, val_viz = run_validation(
                         model=model,
                         loader=val_loader,
                         device=device,
@@ -211,9 +215,26 @@ def train(cfg: dict) -> None:
                         motion_weight=motion_weight,
                         motion_dilate_px=motion_dilate_px,
                     )
-                    append_csv(val_metrics_path, [global_step, val_loss])
+                    append_csv(
+                        val_metrics_path,
+                        [
+                            global_step,
+                            val_metrics["loss"],
+                            val_metrics["mse"],
+                            val_metrics["psnr"],
+                            val_metrics["ssim"],
+                        ],
+                    )
                     if wandb_run is not None:
-                        wandb.log({"val_loss": val_loss}, step=global_step)
+                        wandb.log(
+                            {
+                                "val_loss": val_metrics["loss"],
+                                "val_mse": val_metrics["mse"],
+                                "val_psnr": val_metrics["psnr"],
+                                "val_ssim": val_metrics["ssim"],
+                            },
+                            step=global_step,
+                        )
                     if val_viz is not None:
                         save_image(
                             tag="val",
@@ -223,7 +244,7 @@ def train(cfg: dict) -> None:
                             wandb_run=wandb_run,
                         )
                     if val_rollout_ready and val_env is not None:
-                        run_rollout_video(
+                        rollout_result = run_rollout_video(
                             model=model,
                             env=val_env,
                             device=device,
@@ -231,8 +252,26 @@ def train(cfg: dict) -> None:
                             fps=val_rollout_fps,
                             step=global_step,
                             video_dir=video_dir,
+                            plot_dir=plot_dir,
                             wandb_run=wandb_run,
                         )
+                        if rollout_result is not None:
+                            horizons = rollout_result["horizons"]
+                            mse_by_horizon = rollout_result["mse_by_horizon"]
+                            psnr_by_horizon = rollout_result["psnr_by_horizon"]
+                            for horizon, mse, psnr in zip(horizons, mse_by_horizon, psnr_by_horizon):
+                                append_csv(rollout_metrics_path, [global_step, horizon, mse, psnr])
+                            if wandb_run is not None:
+                                rollout_log = {
+                                    "val_rollout_final_mse": rollout_result["final_mse"],
+                                    "val_rollout_final_psnr": rollout_result["final_psnr"],
+                                    "val_rollout_mean_mse": rollout_result["mean_mse"],
+                                    "val_rollout_mean_psnr": rollout_result["mean_psnr"],
+                                }
+                                for horizon, mse, psnr in zip(horizons, mse_by_horizon, psnr_by_horizon):
+                                    rollout_log[f"val_rollout_mse_h{horizon:02d}"] = mse
+                                    rollout_log[f"val_rollout_psnr_h{horizon:02d}"] = psnr
+                                wandb.log(rollout_log, step=global_step)
             if int(train_cfg["max_steps"]) > 0 and global_step >= int(train_cfg["max_steps"]):
                 stop_early = True
                 break

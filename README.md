@@ -60,8 +60,8 @@ python -m src.eval --checkpoint runs/.../ckpt.pt --game coinrun --wandb_mode dis
 
 - Dataset shards: `data/coinrun/shard_*_{frames,actions,done}.npy`
 - Manifest: `data/coinrun/manifest.json`
-- Training run: `runs/<timestamp>_<game>/metrics.csv`, `runs/<timestamp>_<game>/val_metrics.csv`, `runs/<timestamp>_<game>/images/`, `runs/<timestamp>_<game>/videos/`, `runs/<timestamp>_<game>/checkpoints/`, `runs/<timestamp>_<game>/resolved_config.yaml`
-- Eval artifacts: `runs/<timestamp>_<game>_eval/videos/` (MP4 + GIF), `runs/<timestamp>_<game>_eval/plots/mse_vs_horizon.png`
+- Training run: `runs/<timestamp>_<game>/metrics.csv`, `runs/<timestamp>_<game>/val_metrics.csv`, `runs/<timestamp>_<game>/val_rollout_metrics.csv`, `runs/<timestamp>_<game>/images/`, `runs/<timestamp>_<game>/videos/`, `runs/<timestamp>_<game>/plots/`, `runs/<timestamp>_<game>/checkpoints/`, `runs/<timestamp>_<game>/resolved_config.yaml`
+- Eval artifacts: `runs/<timestamp>_<game>_eval/videos/` (MP4 + GIF), `runs/<timestamp>_<game>_eval/plots/rollout_metrics_vs_horizon.png`
 
 ## Notes
 
@@ -71,8 +71,9 @@ python -m src.eval --checkpoint runs/.../ckpt.pt --game coinrun --wandb_mode dis
 - DataLoader settings are explicit in `config.yaml` (`num_workers`, `prefetch_factor`, `persistent_workers`, `pin_memory`); set `prefetch_factor: null` when `num_workers: 0`.
 - Data config is validated at startup and will raise if values are inconsistent.
 - Train/val split is controlled by `data.val_ratio` and validation runs every `train.val_every_steps`.
+- Validation logs `val_loss`, `val_mse`, `val_psnr`, and `val_ssim`.
 - At `train.log_every`, an image strip of the 4 input frames plus predicted next frame is saved (and logged to W&B if enabled).
-- Each validation run can optionally trigger an open-loop rollout video (left=GT, right=prediction) controlled by `train.val_rollout_*`.
+- Each validation run can optionally trigger an open-loop rollout video (left=GT, right=prediction), plus horizon-vs-metric plots for rollout `MSE`/`PSNR`, controlled by `train.val_rollout_*` (default horizon is 32).
 - Default loss: Huber. Use `train.loss=mse` for MSE.
 - CPU-only execution is supported via `train.cpu=true`.
 
@@ -80,4 +81,4 @@ python -m src.eval --checkpoint runs/.../ckpt.pt --game coinrun --wandb_mode dis
 
 - `src/models/world_model.py`: action conditioning and model variants.
 - `src/eval.py`: rollout logic, horizon aggregation, and metrics.
-- `src/utils/metrics.py`: add additional metrics or perceptual losses.
+- `src/metrics/`: image-quality and rollout metric helpers.

@@ -7,13 +7,14 @@ from collections import deque
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from tqdm import tqdm
 import wandb
 
 from src.envs.procgen_wrappers import make_procgen_env
+from src.metrics.image_quality import compute_mse_psnr
+from src.metrics.rollout import save_rollout_metric_plot
 from src.models.registry import build_model_from_checkpoint_cfg
 from src.utils.contracts import validate_rollout_prediction, validate_rollout_stack
 from src.utils.io import ensure_dir, timestamp_dir, init_csv, append_csv
@@ -27,7 +28,7 @@ def rollout_open_loop(
     horizon: int,
     device: torch.device,
     capture_video: bool = False,
-) -> Tuple[float, List[np.ndarray]]:
+) -> Tuple[float, float, List[np.ndarray]]:
     """Roll out the model in open-loop for a fixed horizon."""
     obs, _ = env.reset()
     n_past_frames = int(getattr(model, "n_past_frames", obs.shape[0]))
@@ -56,6 +57,7 @@ def rollout_open_loop(
         frames.append(side_by_side(last_input, last_input))
 
     last_mse = 0.0
+    last_psnr = 0.0
     for _ in range(horizon):
         future_actions = [env.action_space.sample() for _ in range(n_future_frames)]
         action = future_actions[0]
@@ -78,7 +80,11 @@ def rollout_open_loop(
         next_obs, _, terminated, truncated, _ = env.step(action)
         gt_frame = next_obs[-1]
 
-        last_mse = float(np.mean((pred_frame - gt_frame) ** 2))
+        last_mse, last_psnr = compute_mse_psnr(
+            pred=torch.from_numpy(pred_frame).to(device=device, dtype=torch.float32),
+            target=torch.from_numpy(gt_frame).to(device=device, dtype=torch.float32),
+            data_range=1.0,
+        )
 
         if capture_video:
             frames.append(side_by_side(gt_frame, pred_frame))
@@ -90,11 +96,11 @@ def rollout_open_loop(
         if terminated or truncated:
             break
 
-    return last_mse, frames
+    return last_mse, last_psnr, frames
 
 
 def evaluate(args: argparse.Namespace) -> None:
-    """Evaluate horizons, save videos, and plot MSE vs horizon."""
+    """Evaluate horizons, save videos, and plot MSE/PSNR vs horizon."""
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
 
@@ -128,18 +134,20 @@ def evaluate(args: argparse.Namespace) -> None:
     video_dir = ensure_dir(Path(run_dir) / "videos")
     plot_dir = ensure_dir(Path(run_dir) / "plots")
     metrics_path = Path(run_dir) / "metrics.csv"
-    init_csv(metrics_path, ["horizon", "mse"])
+    init_csv(metrics_path, ["horizon", "mse", "psnr"])
 
     horizon_mse: Dict[int, float] = {}
+    horizon_psnr: Dict[int, float] = {}
 
     max_horizon = max(horizons)
     saved_video = False
 
     for horizon in horizons:
         mses: List[float] = []
+        psnrs: List[float] = []
         for ep in tqdm(range(args.episodes), desc=f"horizon {horizon}"):
             capture = horizon == max_horizon and ep == 0 and not saved_video
-            mse, frames = rollout_open_loop(
+            mse, psnr, frames = rollout_open_loop(
                 model=model,
                 env=env,
                 horizon=horizon,
@@ -147,6 +155,7 @@ def evaluate(args: argparse.Namespace) -> None:
                 capture_video=capture,
             )
             mses.append(mse)
+            psnrs.append(psnr)
             if capture and frames:
                 mp4_path = video_dir / f"rollout_h{horizon}.mp4"
                 gif_path = video_dir / f"rollout_h{horizon}.gif"
@@ -162,28 +171,30 @@ def evaluate(args: argparse.Namespace) -> None:
                         print(f"W&B video log failed: {e}")
 
         horizon_mse[horizon] = float(np.mean(mses))
-        append_csv(metrics_path, [horizon, horizon_mse[horizon]])
+        horizon_psnr[horizon] = float(np.mean(psnrs))
+        append_csv(metrics_path, [horizon, horizon_mse[horizon], horizon_psnr[horizon]])
         if wandb_run is not None:
-            wandb.log({"mse": horizon_mse[horizon], "horizon": horizon}, step=horizon)
+            wandb.log(
+                {"mse": horizon_mse[horizon], "psnr": horizon_psnr[horizon], "horizon": horizon},
+                step=horizon,
+            )
 
     horizons_sorted = sorted(horizon_mse.keys())
-    values = [horizon_mse[h] for h in horizons_sorted]
-
-    plt.figure()
-    plt.plot(horizons_sorted, values, marker="o")
-    plt.xlabel("Horizon")
-    plt.ylabel("MSE")
-    plt.title("Open-loop MSE vs Horizon")
-    plt.grid(True, linestyle="--", alpha=0.4)
-    plot_path = plot_dir / "mse_vs_horizon.png"
-    plt.savefig(plot_path)
-    plt.close()
+    mse_values = [horizon_mse[h] for h in horizons_sorted]
+    psnr_values = [horizon_psnr[h] for h in horizons_sorted]
+    plot_path = save_rollout_metric_plot(
+        horizons=horizons_sorted,
+        mse_values=mse_values,
+        psnr_values=psnr_values,
+        out_path=plot_dir / "rollout_metrics_vs_horizon.png",
+        title="Open-loop rollout metrics vs horizon",
+    )
 
     print(f"Eval complete. Results in {run_dir}")
     env.close()
     if wandb_run is not None:
         try:
-            wandb.log({"mse_vs_horizon": wandb.Image(str(plot_path))})
+            wandb.log({"rollout_metrics_vs_horizon": wandb.Image(str(plot_path))})
         except Exception as e:  # noqa: BLE001
             print(f"W&B image log failed: {e}")
         wandb_run.finish()
@@ -195,7 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--checkpoint", type=str, required=True)
     p.add_argument("--game", type=str, required=True)
     p.add_argument("--episodes", type=int, default=5)
-    p.add_argument("--horizons", type=int, nargs="+", default=[1, 5, 10, 30])
+    p.add_argument("--horizons", type=int, nargs="+", default=[1, 5, 10, 32])
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--cpu", action="store_true", help="Force CPU execution")

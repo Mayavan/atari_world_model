@@ -32,6 +32,7 @@ def test_rollout_small_horizon():
     env = FakeEnv()
     model = WorldModel(num_actions=4)
     device = torch.device("cpu")
-    mse, frames = rollout_open_loop(model, env, horizon=3, device=device, capture_video=True)
+    mse, psnr, frames = rollout_open_loop(model, env, horizon=3, device=device, capture_video=True)
     assert isinstance(mse, float)
-    assert len(frames) <= 3
+    assert isinstance(psnr, float)
+    assert len(frames) <= 4

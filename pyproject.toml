@@ -15,6 +15,7 @@ keywords = ["world-model", "offline", "pytorch"]
 dependencies = [
   "numpy>=1.26,<2",
   "torch>=2.2",
+  "torchmetrics>=1.4",
   "gymnasium>=0.29.1",
   "imageio>=2.34",
   "imageio-ffmpeg>=0.3,<0.4; python_version < '3.11'",

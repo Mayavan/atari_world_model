@@ -47,6 +47,6 @@ train:
   log_every: 500
   val_every_steps: 1000
   val_rollout_enabled: true
-  val_rollout_horizon: 30
+  val_rollout_horizon: 32
   val_rollout_fps: 30
   cpu: false
