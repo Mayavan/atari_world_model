@@ -85,22 +85,39 @@ def _build_recon_grid(
     recon: torch.Tensor,
     max_samples: int = 4,
 ) -> np.ndarray | None:
-    """Create a 2x2 grid of sample strips: [target channels | recon channels] per tile."""
+    """Create a 2x2 RGB grid: [target strip | recon strip] per tile."""
     target_np = target.detach().cpu().float().clamp(0.0, 1.0).numpy()
     recon_np = recon.detach().cpu().float().clamp(0.0, 1.0).numpy()
     if target_np.shape != recon_np.shape:
         raise ValueError(
             f"target/recon shape mismatch: {tuple(target_np.shape)} vs {tuple(recon_np.shape)}"
         )
+    if target_np.ndim != 4:
+        raise ValueError(f"Expected BCHW tensors for recon grid, got shape={tuple(target_np.shape)}")
+    channels = int(target_np.shape[1])
+    if channels % 3 != 0:
+        raise ValueError(
+            "Autoencoder recon grid expects RGB-grouped channels. "
+            f"Got channels={channels}, which is not divisible by 3."
+        )
+    frames_per_sample = channels // 3
     count = min(int(target_np.shape[0]), int(max_samples), 4)
     if count <= 0:
         return None
 
     tiles: list[np.ndarray] = []
     for idx in range(count):
-        tgt_strip = np.concatenate([target_np[idx, c] for c in range(target_np.shape[1])], axis=1)
-        rec_strip = np.concatenate([recon_np[idx, c] for c in range(recon_np.shape[1])], axis=1)
-        tiles.append(np.concatenate([tgt_strip, rec_strip], axis=1))
+        target_frames = target_np[idx].reshape(frames_per_sample, 3, target_np.shape[2], target_np.shape[3])
+        recon_frames = recon_np[idx].reshape(frames_per_sample, 3, recon_np.shape[2], recon_np.shape[3])
+        target_strip = np.concatenate(
+            [np.transpose(frame, (1, 2, 0)) for frame in target_frames],
+            axis=1,
+        )
+        recon_strip = np.concatenate(
+            [np.transpose(frame, (1, 2, 0)) for frame in recon_frames],
+            axis=1,
+        )
+        tiles.append(np.concatenate([target_strip, recon_strip], axis=1))
 
     # Fill to 4 tiles so the layout is always 2x2.
     while len(tiles) < 4:
@@ -119,6 +136,8 @@ def _log_recon_grid(
     image_dir: Path,
     wandb_run,
 ) -> None:
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(f"Expected RGB image grid shape (H, W, 3), got {tuple(image.shape)}")
     path = image_dir / f"{tag}_step_{step:08d}.png"
     imageio.imwrite(path, (image * 255.0).astype(np.uint8))
     if wandb_run is not None:

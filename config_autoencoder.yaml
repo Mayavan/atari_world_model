@@ -25,7 +25,7 @@ scheduler:
   final_div_factor: 1000.0
 
 data:
-  data_dir: data/coinrun
+  data_dir: data/coinrun_rgb
   game: coinrun
   batch_size: 128
   num_workers: 2
