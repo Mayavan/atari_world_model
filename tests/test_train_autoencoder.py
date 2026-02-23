@@ -63,25 +63,20 @@ def test_compute_autoencoder_losses_with_variance_regularizer() -> None:
 
 
 def test_build_recon_grid_layout_is_2x2_for_four_samples() -> None:
-    target = torch.zeros(4, 1, 2, 2)
-    recon = torch.zeros(4, 1, 2, 2)
+    target = torch.zeros(4, 3, 2, 2)
+    recon = torch.zeros(4, 3, 2, 2)
     for idx in range(4):
-        target[idx] = idx / 10.0
-        recon[idx] = (idx + 4) / 10.0
+        for channel in range(3):
+            target[idx, channel] = (idx * 3 + channel) / 100.0
+            recon[idx, channel] = (idx * 3 + channel + 12) / 100.0
 
     grid = _build_recon_grid(target=target, recon=recon)
     assert grid is not None
-    assert grid.shape == (4, 8)
+    assert grid.shape == (4, 8, 3)
 
-    # top-left tile (sample 0)
-    assert float(grid[0, 0]) == pytest.approx(0.0, abs=1e-6)
-    assert float(grid[0, 3]) == pytest.approx(0.4, abs=1e-6)
-    # top-right tile (sample 1)
-    assert float(grid[0, 4]) == pytest.approx(0.1, abs=1e-6)
-    assert float(grid[0, 7]) == pytest.approx(0.5, abs=1e-6)
-    # bottom-left tile (sample 2)
-    assert float(grid[2, 0]) == pytest.approx(0.2, abs=1e-6)
-    assert float(grid[2, 3]) == pytest.approx(0.6, abs=1e-6)
-    # bottom-right tile (sample 3)
-    assert float(grid[2, 4]) == pytest.approx(0.3, abs=1e-6)
-    assert float(grid[2, 7]) == pytest.approx(0.7, abs=1e-6)
+    # Sample 0 target tile starts at top-left and recon starts after width=2.
+    assert float(grid[0, 0, 0]) == pytest.approx(0.00, abs=1e-6)
+    assert float(grid[0, 0, 1]) == pytest.approx(0.01, abs=1e-6)
+    assert float(grid[0, 2, 0]) == pytest.approx(0.12, abs=1e-6)
+    # Sample 3 target tile is bottom-right quadrant.
+    assert float(grid[2, 4, 0]) == pytest.approx(0.09, abs=1e-6)

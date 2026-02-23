@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-"""Training loop for the world model."""
+"""Training loop for the latent flow-matching world model."""
 
 import sys
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from tqdm import tqdm
 import wandb
 
@@ -14,9 +13,9 @@ from src.config import apply_overrides, load_config, save_config, validate_data_
 from src.dataset.offline_dataset import create_train_val_loaders
 from src.envs.procgen_wrappers import make_procgen_env
 from src.models.registry import build_model_from_config
-from src.utils.io import ensure_dir, init_csv, append_csv, timestamp_dir
+from src.utils.contracts import validate_supervised_batch
+from src.utils.io import append_csv, ensure_dir, init_csv, timestamp_dir
 from src.utils.seed import set_seed
-from src.utils.contracts import validate_model_output, validate_supervised_batch
 from src.utils.train_utils import (
     log_prediction_image,
     parse_train_cli,
@@ -27,7 +26,7 @@ from src.utils.train_utils import (
 
 
 def train(cfg: dict) -> None:
-    """Run a simple teacher-forced training loop and save checkpoints."""
+    """Run latent flow matching training and save checkpoints."""
     experiment = cfg["experiment"]
     scheduler_cfg = cfg["scheduler"]
     data_cfg = validate_data_config(cfg["data"])
@@ -64,6 +63,8 @@ def train(cfg: dict) -> None:
         data_cfg.game,
         seed=int(experiment["seed"]),
         frame_stack=data_cfg.n_past_frames,
+        obs_mode="rgb",
+        normalize=True,
     )
     num_actions = env.action_space.n
     env.close()
@@ -79,23 +80,12 @@ def train(cfg: dict) -> None:
     val_rollout_enabled = bool(train_cfg.get("val_rollout_enabled", True))
     val_rollout_horizon = int(train_cfg.get("val_rollout_horizon", 32))
     val_rollout_fps = int(train_cfg.get("val_rollout_fps", 30))
-    motion_tau = float(train_cfg.get("motion_tau", 0.02))
-    motion_weight = float(train_cfg.get("motion_weight", 10.0))
-    motion_dilate_px = int(train_cfg.get("motion_dilate_px", 5))
-    if motion_dilate_px < 0:
-        raise ValueError("train.motion_dilate_px must be >= 0.")
     val_rollout_ready = (
         val_loader is not None
         and int(train_cfg.get("val_every_steps", 0)) > 0
         and val_rollout_enabled
     )
     val_env = None
-    if val_rollout_ready:
-        val_env = make_procgen_env(
-            data_cfg.game,
-            seed=int(experiment["seed"]),
-            frame_stack=data_cfg.n_past_frames,
-        )
 
     model_cfg = cfg.get("model", {})
     model, ckpt_model_cfg = build_model_from_config(
@@ -106,6 +96,19 @@ def train(cfg: dict) -> None:
         n_future_frames=data_cfg.n_future_frames,
     )
     model.to(device)
+    frame_channels = int(getattr(model, "frame_channels", 1))
+    sampling_steps = int(getattr(model, "sampling_steps", 16))
+    if frame_channels != 3:
+        raise ValueError("latent_flow_world_model requires frame_channels=3")
+
+    if val_rollout_ready:
+        val_env = make_procgen_env(
+            data_cfg.game,
+            seed=int(experiment["seed"]),
+            frame_stack=data_cfg.n_past_frames,
+            obs_mode="rgb",
+            normalize=True,
+        )
 
     if not (scheduler_cfg["enabled"] and scheduler_cfg["type"] == "onecycle"):
         raise ValueError("Scheduler must be enabled with type 'onecycle'.")
@@ -113,7 +116,16 @@ def train(cfg: dict) -> None:
     if max_lr <= 0:
         raise ValueError("OneCycleLR requires scheduler.max_lr > 0.")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=max_lr)
+    trainable_parameters = [param for param in model.parameters() if param.requires_grad]
+    if not trainable_parameters:
+        raise ValueError("No trainable parameters were found for optimization.")
+    grad_clip_norm = float(train_cfg.get("grad_clip_norm", 1.0))
+    if grad_clip_norm < 0.0:
+        raise ValueError("train.grad_clip_norm must be >= 0.")
+    weight_decay = float(train_cfg.get("weight_decay", 0.01))
+    if weight_decay < 0.0:
+        raise ValueError("train.weight_decay must be >= 0.")
+    optimizer = torch.optim.AdamW(trainable_parameters, lr=max_lr, weight_decay=weight_decay)
 
     total_steps = len(train_loader) * int(train_cfg["epochs"])
     max_steps = int(train_cfg["max_steps"])
@@ -135,7 +147,7 @@ def train(cfg: dict) -> None:
     video_dir = ensure_dir(Path(run_dir) / "videos")
     plot_dir = ensure_dir(Path(run_dir) / "plots")
     metrics_path = Path(run_dir) / "metrics.csv"
-    init_csv(metrics_path, ["epoch", "step", "loss"])
+    init_csv(metrics_path, ["epoch", "step", "loss", "lr"])
     val_metrics_path = Path(run_dir) / "val_metrics.csv"
     rollout_metrics_path = Path(run_dir) / "val_rollout_metrics.csv"
     if val_loader is not None and int(train_cfg["val_every_steps"]) > 0:
@@ -162,41 +174,37 @@ def train(cfg: dict) -> None:
                 n_past_frames=data_cfg.n_past_frames,
                 n_past_actions=data_cfg.n_past_actions,
                 n_future_frames=data_cfg.n_future_frames,
+                frame_channels=frame_channels,
             )
 
             optimizer.zero_grad(set_to_none=True)
-            logits = model(obs, future_actions, past_actions)
-            validate_model_output(logits=logits, next_obs=next_obs)
-            last_frame = obs[:, -1:, :, :]
-            motion = (next_obs - last_frame).abs() > motion_tau
-            motion = motion.float()
-            motion = F.max_pool2d(
-                motion,
-                kernel_size=2 * motion_dilate_px + 1,
-                stride=1,
-                padding=motion_dilate_px,
-            )
-            weights = 1.0 + motion_weight * motion
-            weights = weights / weights.mean().clamp_min(1e-6)
-            loss_map = F.binary_cross_entropy_with_logits(
-                logits,
-                next_obs,
-                reduction="none",
-            )
-            loss = (weights * loss_map).mean()
-
+            losses = model.compute_flow_matching_loss(obs, future_actions, past_actions, next_obs)
+            loss = losses["loss"]
+            if not torch.isfinite(loss):
+                raise RuntimeError(
+                    f"Encountered non-finite loss at global_step={global_step}: {float(loss)}"
+                )
             loss.backward()
+            if grad_clip_norm > 0.0:
+                torch.nn.utils.clip_grad_norm_(trainable_parameters, max_norm=grad_clip_norm)
             optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
+            scheduler.step()
 
             global_step += 1
             if global_step % int(train_cfg["log_every"]) == 0:
-                pbar.set_postfix({"loss": float(loss.item())})
-                append_csv(metrics_path, [epoch, global_step, float(loss.item())])
+                loss_value = float(loss.item())
+                lr_value = float(optimizer.param_groups[0]["lr"])
+                pbar.set_postfix({"loss": loss_value, "lr": lr_value})
+                append_csv(metrics_path, [epoch, global_step, loss_value, lr_value])
                 if wandb_run is not None:
-                    wandb.log({"loss": float(loss.item()), "epoch": epoch}, step=global_step)
-                pred = torch.sigmoid(logits)
+                    wandb.log({"loss": loss_value, "lr": lr_value, "epoch": epoch}, step=global_step)
+                with torch.no_grad():
+                    pred = model.sample_future(
+                        obs,
+                        future_actions,
+                        past_actions,
+                        sampling_steps=sampling_steps,
+                    )
                 log_prediction_image(
                     tag="train",
                     step=global_step,
@@ -204,6 +212,7 @@ def train(cfg: dict) -> None:
                     next_pred=pred,
                     image_dir=image_dir,
                     wandb_run=wandb_run,
+                    frame_channels=frame_channels,
                 )
             if val_loader is not None and int(train_cfg["val_every_steps"]) > 0:
                 if global_step % int(train_cfg["val_every_steps"]) == 0:
@@ -211,9 +220,7 @@ def train(cfg: dict) -> None:
                         model=model,
                         loader=val_loader,
                         device=device,
-                        motion_tau=motion_tau,
-                        motion_weight=motion_weight,
-                        motion_dilate_px=motion_dilate_px,
+                        sampling_steps=sampling_steps,
                     )
                     append_csv(
                         val_metrics_path,
@@ -254,6 +261,7 @@ def train(cfg: dict) -> None:
                             video_dir=video_dir,
                             plot_dir=plot_dir,
                             wandb_run=wandb_run,
+                            sampling_steps=sampling_steps,
                         )
                         if rollout_result is not None:
                             horizons = rollout_result["horizons"]

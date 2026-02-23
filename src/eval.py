@@ -17,9 +17,57 @@ from src.metrics.image_quality import compute_mse_psnr
 from src.metrics.rollout import save_rollout_metric_plot
 from src.models.registry import build_model_from_checkpoint_cfg
 from src.utils.contracts import validate_rollout_prediction, validate_rollout_stack
-from src.utils.io import ensure_dir, timestamp_dir, init_csv, append_csv
-from src.utils.video import side_by_side, save_gif, save_video_mp4
+from src.utils.io import append_csv, ensure_dir, init_csv, timestamp_dir
 from src.utils.seed import set_seed
+from src.utils.video import save_gif, save_video_mp4, side_by_side
+
+
+def _stack_to_model_obs(
+    pred_stack: np.ndarray,
+    *,
+    frame_channels: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if frame_channels == 3:
+        if pred_stack.ndim != 4 or pred_stack.shape[-1] != 3:
+            raise ValueError(f"Expected RGB stack shape (T,H,W,3), got {pred_stack.shape}")
+        packed = np.transpose(pred_stack, (0, 3, 1, 2)).reshape(
+            pred_stack.shape[0] * 3,
+            pred_stack.shape[1],
+            pred_stack.shape[2],
+        )
+    elif frame_channels == 1:
+        if pred_stack.ndim != 3:
+            raise ValueError(f"Expected grayscale stack shape (T,H,W), got {pred_stack.shape}")
+        packed = pred_stack
+    else:
+        raise ValueError(f"Unsupported frame_channels={frame_channels}")
+    return torch.from_numpy(packed).unsqueeze(0).to(device=device, dtype=torch.float32)
+
+
+def _latest_frame_from_env_stack(stack: np.ndarray, *, frame_channels: int) -> np.ndarray:
+    frame = stack[-1]
+    if frame_channels == 3:
+        if frame.ndim != 3 or frame.shape[-1] != 3:
+            raise ValueError(f"Expected RGB frame (H,W,3), got {frame.shape}")
+        return frame
+    if frame_channels == 1:
+        if frame.ndim != 2:
+            raise ValueError(f"Expected grayscale frame (H,W), got {frame.shape}")
+        return frame
+    raise ValueError(f"Unsupported frame_channels={frame_channels}")
+
+
+def _first_frame_from_prediction(pred: torch.Tensor, *, frame_channels: int) -> np.ndarray:
+    pred_np = pred.detach().cpu().float().clamp(0.0, 1.0).numpy()
+    if pred_np.ndim != 4:
+        raise ValueError(f"Expected rank-4 BCHW prediction, got shape={pred_np.shape}")
+    first = pred_np[0, :frame_channels]
+    if frame_channels == 1:
+        return first[0]
+    if frame_channels == 3:
+        return np.transpose(first, (1, 2, 0))
+    raise ValueError(f"Unsupported frame_channels={frame_channels}")
 
 
 def rollout_open_loop(
@@ -27,6 +75,7 @@ def rollout_open_loop(
     env,
     horizon: int,
     device: torch.device,
+    sampling_steps: int,
     capture_video: bool = False,
 ) -> Tuple[float, float, List[np.ndarray]]:
     """Roll out the model in open-loop for a fixed horizon."""
@@ -34,10 +83,14 @@ def rollout_open_loop(
     n_past_frames = int(getattr(model, "n_past_frames", obs.shape[0]))
     n_past_actions = int(getattr(model, "n_past_actions", 0))
     n_future_frames = int(getattr(model, "n_future_frames", 1))
+    frame_channels = int(getattr(model, "frame_channels", 1))
 
-    # Build a real input stack with actual actions (no zero padding).
     pred_stack = obs[-n_past_frames:].copy()
-    validate_rollout_stack(pred_stack=pred_stack, n_past_frames=n_past_frames)
+    validate_rollout_stack(
+        pred_stack=pred_stack,
+        n_past_frames=n_past_frames,
+        frame_channels=frame_channels,
+    )
     action_history: list[int] = []
     warmup_needed = max(0, n_past_frames - 1)
     while len(action_history) < warmup_needed:
@@ -53,7 +106,7 @@ def rollout_open_loop(
 
     frames: List[np.ndarray] = []
     if capture_video:
-        last_input = pred_stack[-1]
+        last_input = _latest_frame_from_env_stack(pred_stack, frame_channels=frame_channels)
         frames.append(side_by_side(last_input, last_input))
 
     last_mse = 0.0
@@ -61,28 +114,37 @@ def rollout_open_loop(
     for _ in range(horizon):
         future_actions = [env.action_space.sample() for _ in range(n_future_frames)]
         action = future_actions[0]
-        obs_t = torch.from_numpy(pred_stack).unsqueeze(0).to(device)
+        obs_t = _stack_to_model_obs(pred_stack, frame_channels=frame_channels, device=device)
         future_t = torch.tensor([future_actions], device=device, dtype=torch.int64)
         past_t = torch.tensor([list(past_actions)], device=device, dtype=torch.int64)
 
         with torch.no_grad():
-            logits = model(obs_t, future_t, past_t)
+            pred = model.sample_future(
+                obs_t,
+                future_t,
+                past_t,
+                sampling_steps=sampling_steps,
+            )
             validate_rollout_prediction(
-                logits=logits,
-                n_future_frames=n_future_frames,
+                pred=pred,
+                expected_channels=n_future_frames * frame_channels,
                 height=pred_stack.shape[1],
                 width=pred_stack.shape[2],
             )
-            pred = torch.sigmoid(logits)
-        next_frame = pred[:, 0].squeeze(0).cpu().numpy()
-        pred_frame = next_frame
+        pred_frame = _first_frame_from_prediction(pred, frame_channels=frame_channels)
 
         next_obs, _, terminated, truncated, _ = env.step(action)
-        gt_frame = next_obs[-1]
+        gt_frame = _latest_frame_from_env_stack(next_obs, frame_channels=frame_channels)
 
+        if frame_channels == 3:
+            pred_metric = torch.from_numpy(pred_frame).permute(2, 0, 1)
+            gt_metric = torch.from_numpy(gt_frame).permute(2, 0, 1)
+        else:
+            pred_metric = torch.from_numpy(pred_frame)
+            gt_metric = torch.from_numpy(gt_frame)
         last_mse, last_psnr = compute_mse_psnr(
-            pred=torch.from_numpy(pred_frame).to(device=device, dtype=torch.float32),
-            target=torch.from_numpy(gt_frame).to(device=device, dtype=torch.float32),
+            pred=pred_metric.to(device=device, dtype=torch.float32),
+            target=gt_metric.to(device=device, dtype=torch.float32),
             data_range=1.0,
         )
 
@@ -120,8 +182,15 @@ def evaluate(args: argparse.Namespace) -> None:
     ckpt = torch.load(args.checkpoint, map_location=device)
     model_cfg = ckpt.get("model_cfg", {})
     n_past_frames = int(model_cfg.get("n_past_frames", 4))
+    sampling_steps = int(model_cfg.get("sampling_steps", 16))
 
-    env = make_procgen_env(args.game, seed=args.seed, frame_stack=n_past_frames)
+    env = make_procgen_env(
+        args.game,
+        seed=args.seed,
+        frame_stack=n_past_frames,
+        obs_mode="rgb",
+        normalize=True,
+    )
     num_actions = env.action_space.n
 
     model = build_model_from_checkpoint_cfg(model_cfg=model_cfg, num_actions=num_actions)
@@ -152,6 +221,7 @@ def evaluate(args: argparse.Namespace) -> None:
                 env=env,
                 horizon=horizon,
                 device=device,
+                sampling_steps=sampling_steps,
                 capture_video=capture,
             )
             mses.append(mse)

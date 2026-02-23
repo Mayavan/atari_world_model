@@ -18,6 +18,7 @@ def validate_supervised_batch(
     n_past_frames: int,
     n_past_actions: int,
     n_future_frames: int,
+    frame_channels: int = 1,
 ) -> None:
     """Validate training/validation batch contract before model forward."""
     if obs.ndim != 4:
@@ -43,13 +44,17 @@ def validate_supervised_batch(
             "Batch size mismatch: "
             f"obs={b_obs}, next_obs={b_next}, past_actions={b_past}, future_actions={b_future}"
         )
-    if c_obs != int(n_past_frames):
+    expected_obs_channels = int(n_past_frames) * int(frame_channels)
+    expected_next_channels = int(n_future_frames) * int(frame_channels)
+    if c_obs != expected_obs_channels:
         raise ValueError(
-            f"obs channels must equal n_past_frames={n_past_frames}, got {c_obs}"
+            "obs channels must equal "
+            f"n_past_frames*frame_channels={expected_obs_channels}, got {c_obs}"
         )
-    if c_next != int(n_future_frames):
+    if c_next != expected_next_channels:
         raise ValueError(
-            f"next_obs channels must equal n_future_frames={n_future_frames}, got {c_next}"
+            "next_obs channels must equal "
+            f"n_future_frames*frame_channels={expected_next_channels}, got {c_next}"
         )
     if t_past != int(n_past_actions):
         raise ValueError(
@@ -74,45 +79,55 @@ def validate_supervised_batch(
         raise ValueError(f"future_actions must be int64, got dtype={future_actions.dtype}")
 
 
-def validate_model_output(*, logits: torch.Tensor, next_obs: torch.Tensor) -> None:
+def validate_model_output(*, pred: torch.Tensor, next_obs: torch.Tensor) -> None:
     """Validate model output tensor against supervised target shape contract."""
-    if logits.shape != next_obs.shape:
+    if pred.shape != next_obs.shape:
         raise ValueError(
             "model output shape mismatch: "
-            f"logits={_shape(logits)} vs next_obs={_shape(next_obs)}"
+            f"pred={_shape(pred)} vs next_obs={_shape(next_obs)}"
         )
 
 
 def validate_rollout_prediction(
     *,
-    logits: torch.Tensor,
-    n_future_frames: int,
+    pred: torch.Tensor,
+    expected_channels: int,
     height: int,
     width: int,
 ) -> None:
     """Validate model output shape in open-loop rollout where target is unavailable."""
-    if logits.ndim != 4:
-        raise ValueError(f"logits must be rank-4 (B,C,H,W), got shape={_shape(logits)}")
-    if logits.shape[0] != 1:
-        raise ValueError(f"rollout expects batch size 1 logits, got {logits.shape[0]}")
-    if logits.shape[1] != int(n_future_frames):
+    if pred.ndim != 4:
+        raise ValueError(f"pred must be rank-4 (B,C,H,W), got shape={_shape(pred)}")
+    if pred.shape[0] != 1:
+        raise ValueError(f"rollout expects batch size 1 pred tensor, got {pred.shape[0]}")
+    if pred.shape[1] != int(expected_channels):
         raise ValueError(
-            f"logits channels must equal n_future_frames={n_future_frames}, got {logits.shape[1]}"
+            "pred channels must match expected channels; "
+            f"expected {expected_channels}, got {pred.shape[1]}"
         )
-    if logits.shape[2] != int(height) or logits.shape[3] != int(width):
+    if pred.shape[2] != int(height) or pred.shape[3] != int(width):
         raise ValueError(
-            f"logits spatial shape must be ({height}, {width}), got {logits.shape[2:]}"
+            f"pred spatial shape must be ({height}, {width}), got {pred.shape[2:]}"
         )
 
 
-def validate_rollout_stack(*, pred_stack, n_past_frames: int) -> None:
+def validate_rollout_stack(*, pred_stack, n_past_frames: int, frame_channels: int = 1) -> None:
     """Validate open-loop rollout frame stack contract."""
     if pred_stack is None:
         raise ValueError("pred_stack must not be None")
     if not hasattr(pred_stack, "ndim"):
         raise ValueError("pred_stack must be an array-like tensor with shape (T,H,W)")
-    if pred_stack.ndim != 3:
-        raise ValueError(f"pred_stack must be rank-3 (T,H,W), got shape={pred_stack.shape}")
+    if int(frame_channels) == 3:
+        if pred_stack.ndim != 4 or pred_stack.shape[-1] != 3:
+            raise ValueError(
+                "RGB rollout stack must be rank-4 (T,H,W,3), "
+                f"got shape={pred_stack.shape}"
+            )
+    elif int(frame_channels) == 1:
+        if pred_stack.ndim != 3:
+            raise ValueError(f"pred_stack must be rank-3 (T,H,W), got shape={pred_stack.shape}")
+    else:
+        raise ValueError(f"Unsupported frame_channels={frame_channels}")
     if pred_stack.shape[0] != int(n_past_frames):
         raise ValueError(
             f"pred_stack time dimension must equal n_past_frames={n_past_frames}, "

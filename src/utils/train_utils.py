@@ -9,7 +9,6 @@ from typing import Iterable
 import imageio.v2 as imageio
 import numpy as np
 import torch
-import torch.nn.functional as F
 import wandb
 
 from src.metrics.image_quality import compute_image_quality_metrics, compute_mse_psnr
@@ -34,16 +33,90 @@ def parse_train_cli(
     return Path(default_config), argv[1:]
 
 
+def _frame_channels_for_model(model: torch.nn.Module) -> int:
+    return int(getattr(model, "frame_channels", 1))
+
+
+def _packed_channels_to_frames(x: np.ndarray, *, frame_channels: int) -> list[np.ndarray]:
+    if x.ndim != 3:
+        raise ValueError(f"Expected CHW tensor for frame unpacking, got shape={x.shape}")
+    channels, height, width = x.shape
+    if channels % frame_channels != 0:
+        raise ValueError(
+            f"Expected channel count divisible by frame_channels={frame_channels}, got {channels}"
+        )
+    frame_count = channels // frame_channels
+    frames: list[np.ndarray] = []
+    for idx in range(frame_count):
+        frame_chw = x[idx * frame_channels : (idx + 1) * frame_channels]
+        if frame_channels == 1:
+            frame = np.repeat(frame_chw[0][:, :, None], 3, axis=2)
+        elif frame_channels == 3:
+            frame = np.transpose(frame_chw, (1, 2, 0))
+        else:
+            raise ValueError(f"Unsupported frame_channels={frame_channels}")
+        if frame.shape[:2] != (height, width):
+            raise ValueError(f"Unexpected frame shape={frame.shape}")
+        frames.append(np.clip(frame, 0.0, 1.0))
+    return frames
+
+
+def _stack_to_model_obs(
+    pred_stack: np.ndarray,
+    *,
+    frame_channels: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if frame_channels == 3:
+        if pred_stack.ndim != 4 or pred_stack.shape[-1] != 3:
+            raise ValueError(f"Expected RGB stack (T,H,W,3), got shape={pred_stack.shape}")
+        packed = np.transpose(pred_stack, (0, 3, 1, 2)).reshape(
+            pred_stack.shape[0] * 3,
+            pred_stack.shape[1],
+            pred_stack.shape[2],
+        )
+    elif frame_channels == 1:
+        if pred_stack.ndim != 3:
+            raise ValueError(f"Expected grayscale stack (T,H,W), got shape={pred_stack.shape}")
+        packed = pred_stack
+    else:
+        raise ValueError(f"Unsupported frame_channels={frame_channels}")
+    return torch.from_numpy(packed).unsqueeze(0).to(device=device, dtype=torch.float32)
+
+
+def _first_frame_from_packed_prediction(pred: torch.Tensor, *, frame_channels: int) -> np.ndarray:
+    pred_np = pred.detach().cpu().float().clamp(0.0, 1.0).numpy()
+    if pred_np.ndim != 4:
+        raise ValueError(f"Expected rank-4 BCHW prediction, got shape={pred_np.shape}")
+    first = pred_np[0, :frame_channels]
+    if frame_channels == 1:
+        return first[0]
+    if frame_channels == 3:
+        return np.transpose(first, (1, 2, 0))
+    raise ValueError(f"Unsupported frame_channels={frame_channels}")
+
+
+def _latest_frame_from_env_stack(stack: np.ndarray, *, frame_channels: int) -> np.ndarray:
+    last = stack[-1]
+    if frame_channels == 3:
+        if last.ndim != 3 or last.shape[-1] != 3:
+            raise ValueError(f"Expected RGB frame shape (H,W,3), got {last.shape}")
+        return last
+    if frame_channels == 1:
+        if last.ndim != 2:
+            raise ValueError(f"Expected grayscale frame shape (H,W), got {last.shape}")
+        return last
+    raise ValueError(f"Unsupported frame_channels={frame_channels}")
+
+
 def run_validation(
     *,
     model: torch.nn.Module,
     loader: Iterable,
     device: torch.device,
-    motion_tau: float,
-    motion_weight: float,
-    motion_dilate_px: int,
+    sampling_steps: int,
 ) -> tuple[dict[str, float], np.ndarray | None]:
-    """Evaluate validation loss and image-quality metrics."""
+    """Evaluate validation flow loss and image-quality metrics."""
     model.eval()
     total_loss = 0.0
     total_mse = 0.0
@@ -51,6 +124,8 @@ def run_validation(
     total_ssim = 0.0
     total_samples = 0
     viz_image = None
+    frame_channels = _frame_channels_for_model(model)
+
     with torch.no_grad():
         for obs, past_actions, future_actions, next_obs, _ in loader:
             obs = obs.to(device)
@@ -65,32 +140,21 @@ def run_validation(
                 n_past_frames=int(getattr(model, "n_past_frames", obs.shape[1])),
                 n_past_actions=int(getattr(model, "n_past_actions", past_actions.shape[1])),
                 n_future_frames=int(getattr(model, "n_future_frames", next_obs.shape[1])),
+                frame_channels=frame_channels,
             )
-            logits = model(obs, future_actions, past_actions)
-            last_frame = obs[:, -1:, :, :]
-            validate_model_output(logits=logits, next_obs=next_obs)
-            motion = (next_obs - last_frame).abs() > motion_tau
-            motion = motion.float()
-            motion = F.max_pool2d(
-                motion,
-                kernel_size=2 * motion_dilate_px + 1,
-                stride=1,
-                padding=motion_dilate_px,
+            losses = model.compute_flow_matching_loss(obs, future_actions, past_actions, next_obs)
+            pred = model.sample_future(
+                obs,
+                future_actions,
+                past_actions,
+                sampling_steps=sampling_steps,
             )
-            weights = 1.0 + motion_weight * motion
-            weights = weights / weights.mean().clamp_min(1e-6)
-            loss_map = F.binary_cross_entropy_with_logits(
-                logits,
-                next_obs,
-                reduction="none",
-            )
-            loss = (weights * loss_map).mean()
-            pred = torch.sigmoid(logits)
+            validate_model_output(pred=pred, next_obs=next_obs)
             batch_metrics = compute_image_quality_metrics(pred=pred, target=next_obs, data_range=1.0)
             if viz_image is None:
-                viz_image = build_viz_image(obs, pred)
+                viz_image = build_viz_image(obs, pred, frame_channels=frame_channels)
             batch_size = int(obs.shape[0])
-            total_loss += float(loss.item()) * batch_size
+            total_loss += float(losses["loss"].item()) * batch_size
             total_mse += batch_metrics["mse"] * batch_size
             total_psnr += batch_metrics["psnr"] * batch_size
             total_ssim += batch_metrics["ssim"] * batch_size
@@ -106,16 +170,12 @@ def run_validation(
     }, viz_image
 
 
-def build_viz_image(obs: torch.Tensor, next_pred: torch.Tensor) -> np.ndarray:
-    """Create a grayscale strip of input frames plus predicted frames."""
-    obs_np = obs.detach().cpu().numpy()
-    pred_np = next_pred.detach().cpu().numpy()
-    frames = [np.clip(f, 0.0, 1.0) for f in obs_np[0]]
-    if pred_np.ndim == 3:
-        pred_frames = [pred_np[0]]
-    else:
-        pred_frames = list(pred_np[0])
-    frames.extend([np.clip(f, 0.0, 1.0) for f in pred_frames])
+def build_viz_image(obs: torch.Tensor, next_pred: torch.Tensor, *, frame_channels: int) -> np.ndarray:
+    """Create a strip of input frames plus predicted frames."""
+    obs_np = obs[0].detach().cpu().float().clamp(0.0, 1.0).numpy()
+    pred_np = next_pred[0].detach().cpu().float().clamp(0.0, 1.0).numpy()
+    frames = _packed_channels_to_frames(obs_np, frame_channels=frame_channels)
+    frames.extend(_packed_channels_to_frames(pred_np, frame_channels=frame_channels))
     return np.concatenate(frames, axis=1)
 
 
@@ -127,11 +187,11 @@ def log_prediction_image(
     next_pred: torch.Tensor,
     image_dir: Path,
     wandb_run,
+    frame_channels: int,
 ) -> None:
     """Save and optionally log a visualization image."""
     with torch.no_grad():
-        # next_pred is expected to be in [0,1] for visualization.
-        image = build_viz_image(obs, next_pred)
+        image = build_viz_image(obs, next_pred, frame_channels=frame_channels)
     save_image(tag=tag, step=step, image=image, image_dir=image_dir, wandb_run=wandb_run)
 
 
@@ -143,9 +203,9 @@ def save_image(
     image_dir: Path,
     wandb_run,
 ) -> None:
-    """Write a grayscale PNG and log to W&B if enabled."""
+    """Write a PNG and log to W&B if enabled."""
     path = image_dir / f"{tag}_step_{step:08d}.png"
-    imageio.imwrite(path, (image * 255.0).astype(np.uint8))
+    imageio.imwrite(path, (np.clip(image, 0.0, 1.0) * 255.0).astype(np.uint8))
     if wandb_run is not None:
         wandb.log({f"{tag}_viz": wandb.Image(str(path))}, step=step)
 
@@ -161,6 +221,7 @@ def run_rollout_video(
     video_dir: Path,
     plot_dir: Path,
     wandb_run,
+    sampling_steps: int,
     tag: str = "val_rollout",
 ) -> dict[str, object] | None:
     """Run an open-loop rollout, save video/plot, and return rollout metrics."""
@@ -172,10 +233,14 @@ def run_rollout_video(
     n_past_frames = int(getattr(model, "n_past_frames", obs.shape[0]))
     n_past_actions = int(getattr(model, "n_past_actions", 0))
     n_future_frames = int(getattr(model, "n_future_frames", 1))
+    frame_channels = _frame_channels_for_model(model)
 
-    # Build a real input stack with actual actions (no zero padding).
     pred_stack = obs[-n_past_frames:].copy()
-    validate_rollout_stack(pred_stack=pred_stack, n_past_frames=n_past_frames)
+    validate_rollout_stack(
+        pred_stack=pred_stack,
+        n_past_frames=n_past_frames,
+        frame_channels=frame_channels,
+    )
     action_history: list[int] = []
     warmup_needed = max(0, n_past_frames - 1)
     while len(action_history) < warmup_needed:
@@ -193,33 +258,41 @@ def run_rollout_video(
     horizons: list[int] = []
     mse_by_horizon: list[float] = []
     psnr_by_horizon: list[float] = []
-    # First frame: last input frame on both sides (gt|pred format).
-    last_input = pred_stack[-1]
+    last_input = _latest_frame_from_env_stack(pred_stack, frame_channels=frame_channels)
     frames.append(side_by_side(last_input, last_input))
     with torch.no_grad():
         for _ in range(horizon):
             future_actions = [env.action_space.sample() for _ in range(n_future_frames)]
             action = future_actions[0]
-            obs_t = torch.from_numpy(pred_stack).unsqueeze(0).to(device)
+            obs_t = _stack_to_model_obs(pred_stack, frame_channels=frame_channels, device=device)
             future_t = torch.tensor([future_actions], device=device, dtype=torch.int64)
             past_t = torch.tensor([list(past_actions)], device=device, dtype=torch.int64)
-            logits = model(obs_t, future_t, past_t)
+            pred = model.sample_future(
+                obs_t,
+                future_t,
+                past_t,
+                sampling_steps=sampling_steps,
+            )
             validate_rollout_prediction(
-                logits=logits,
-                n_future_frames=n_future_frames,
+                pred=pred,
+                expected_channels=n_future_frames * frame_channels,
                 height=pred_stack.shape[1],
                 width=pred_stack.shape[2],
             )
-            pred = torch.sigmoid(logits)
-            next_frame = pred[:, 0].squeeze(0).cpu().numpy()
-            pred_frame = next_frame
+            pred_frame = _first_frame_from_packed_prediction(pred, frame_channels=frame_channels)
 
             next_obs, _, terminated, truncated, _ = env.step(action)
-            gt_frame = next_obs[-1]
+            gt_frame = _latest_frame_from_env_stack(next_obs, frame_channels=frame_channels)
             frames.append(side_by_side(gt_frame, pred_frame))
+            if frame_channels == 3:
+                pred_metric = torch.from_numpy(pred_frame).permute(2, 0, 1)
+                gt_metric = torch.from_numpy(gt_frame).permute(2, 0, 1)
+            else:
+                pred_metric = torch.from_numpy(pred_frame)
+                gt_metric = torch.from_numpy(gt_frame)
             mse, psnr = compute_mse_psnr(
-                pred=torch.from_numpy(pred_frame).to(device=device, dtype=torch.float32),
-                target=torch.from_numpy(gt_frame).to(device=device, dtype=torch.float32),
+                pred=pred_metric.to(device=device, dtype=torch.float32),
+                target=gt_metric.to(device=device, dtype=torch.float32),
                 data_range=1.0,
             )
             horizons.append(len(horizons) + 1)

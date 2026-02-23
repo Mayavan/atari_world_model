@@ -1,6 +1,6 @@
 # Action-Conditioned World Model (Offline)
 
-Offline next-frame prediction world model using Gymnasium and PyTorch. This repo provides a full runnable scaffold with dataset generation, training, and evaluation (including videos and plots). The current environment setup uses Procgen, but core modeling logic is environment-agnostic.
+Offline latent flow-matching world model using Gymnasium and PyTorch. This repo provides a full runnable scaffold with dataset generation, autoencoder pretraining, world-model training, and evaluation (including videos and plots). The current environment setup uses Procgen, but core modeling logic is environment-agnostic.
 
 ## Setup
 
@@ -39,7 +39,7 @@ python -m src.train_autoencoder
 
 Override config values with dot notation:
 ```bash
-python -m src.train model.type=pixel_world_model train.max_steps=5
+python -m src.train train.max_steps=5 model.sampling_steps=8
 ```
 
 Evaluate:
@@ -73,8 +73,9 @@ python -m src.eval --checkpoint runs/.../ckpt.pt --game coinrun --wandb_mode dis
 
 ## Notes
 
-- Inputs are `(B, 4, 84, 84)` float32 in `[0,1]`, actions `(B,)` int64.
-- Targets are `(B, 1, 84, 84)` float32 in `[0,1]`.
+- World model inputs are RGB channel-packed frame stacks: `(B, n_past_frames*3, 84, 84)` float32 in `[0,1]`.
+- Targets are `(B, n_future_frames*3, 84, 84)` float32 in `[0,1]`.
+- `model.autoencoder_checkpoint` must point to a trained `ConvAutoencoder` checkpoint; the autoencoder is loaded frozen (no gradients).
 - Offline dataset shards are memory-mapped `.npy` files; random access pulls one sample at a time.
 - DataLoader settings are explicit in `config.yaml` (`num_workers`, `prefetch_factor`, `persistent_workers`, `pin_memory`); set `prefetch_factor: null` when `num_workers: 0`.
 - Data config is validated at startup and will raise if values are inconsistent.

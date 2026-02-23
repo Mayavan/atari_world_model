@@ -8,8 +8,12 @@ experiment:
     mode: online
 
 model:
-  type: pixel_world_model
+  type: latent_flow_world_model
+  autoencoder_checkpoint: runs/20260222_160838_coinrun_autoencoder/best_ckpt.pt
+  frame_channels: 3
   action_embed_dim: 64
+  time_embed_dim: 128
+  sampling_steps: 16
   width_mult: 1.0
 
 optimizer: {}
@@ -17,13 +21,13 @@ optimizer: {}
 scheduler:
   type: onecycle
   enabled: true
-  max_lr: 0.005
-  pct_start: 0.3
+  max_lr: 0.0001
+  pct_start: 0.1
   div_factor: 25.0
-  final_div_factor: 10000.0
+  final_div_factor: 1000.0
 
 data:
-  data_dir: data/coinrun
+  data_dir: data/coinrun_rgb
   game: coinrun
   batch_size: 128
   num_workers: 2
@@ -38,12 +42,8 @@ data:
 train:
   epochs: 5
   max_steps: 0
-  loss: bce_logits
-  delta: 1.0
-  motion_weight: 5.0
-  motion_tau: 0.02
-  motion_dilate_px: 4
-  debug_steps: 5
+  grad_clip_norm: 1.0
+  weight_decay: 0.01
   log_every: 500
   val_every_steps: 1000
   val_rollout_enabled: true
