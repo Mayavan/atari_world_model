@@ -33,13 +33,12 @@ The intent is incremental modernization with measurable checkpoints, not a full 
 
 ### 2.3 Environment and Preprocessing
 - Environment creation (`src/envs/procgen_wrappers.py`):
-  - Supports Gymnasium Procgen and legacy Gym Procgen via shimmy compatibility.
+  - Uses Gymnasium env ids, with automatic Procgen registration via procgen+shimmy bridge.
   - Wrapper stack:
-    1. API compatibility wrapper
-    2. Extract RGB key when observation is dict
-    3. Grayscale + resize to `84x84`
-    4. Float normalize to `[0,1]`
-    5. Frame stack along axis 0
+    1. Extract RGB key when observation is dict
+    2. Grayscale or RGB resize to `84x84`
+    3. Optional float normalize to `[0,1]`
+    4. Frame stack along axis 0
 
 ### 2.4 Model Architecture
 - File: `src/models/world_model.py`.

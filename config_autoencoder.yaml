@@ -8,7 +8,7 @@ experiment:
     mode: online
 
 model:
-  in_channels: 1
+  in_channels: 3
   image_height: 84
   image_width: 84
   base_channels: 64

@@ -266,18 +266,14 @@ def train(cfg: dict) -> None:
     wandb_run = None
     wandb_cfg = experiment["wandb"]
     if wandb_cfg["mode"] != "disabled":
-        try:
-            wandb_run = wandb.init(
-                project=wandb_cfg["project"],
-                entity=wandb_cfg.get("entity", None),
-                name=str(experiment["name"]),
-                mode=wandb_cfg["mode"],
-                dir=str(run_dir),
-            )
-            wandb.config.update(cfg, allow_val_change=False)
-        except Exception as e:  # noqa: BLE001
-            print(f"W&B init failed, continuing without logging: {e}")
-            wandb_run = None
+        wandb_run = wandb.init(
+            project=wandb_cfg["project"],
+            entity=wandb_cfg.get("entity", None),
+            name=str(experiment["name"]),
+            mode=wandb_cfg["mode"],
+            dir=str(run_dir),
+        )
+        wandb.config.update(cfg, allow_val_change=False)
 
     force_cpu = bool(train_cfg.get("cpu", False))
     device = torch.device("cuda" if torch.cuda.is_available() and not force_cpu else "cpu")
@@ -289,11 +285,16 @@ def train(cfg: dict) -> None:
         drop_last_val=False,
     )
 
-    model_in_channels = int(model_cfg.get("in_channels", data_cfg.n_future_frames))
-    if model_in_channels != int(data_cfg.n_future_frames):
+    if len(train_loader) == 0:
+        raise ValueError("Train loader is empty; cannot infer autoencoder input channels.")
+    sample_batch = next(iter(train_loader))
+    inferred_target_channels = int(_extract_autoencoder_input(sample_batch).shape[1])
+
+    model_in_channels = int(model_cfg.get("in_channels", inferred_target_channels))
+    if model_in_channels != inferred_target_channels:
         raise ValueError(
-            "model.in_channels must match data.n_future_frames for autoencoder training "
-            f"(got {model_in_channels} vs {data_cfg.n_future_frames})"
+            "model.in_channels must match inferred dataset target channels for autoencoder training "
+            f"(got {model_in_channels} vs {inferred_target_channels})"
         )
     model, ckpt_model_cfg = _build_model_from_cfg(model_cfg=model_cfg, in_channels=model_in_channels)
     model.to(device)

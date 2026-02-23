@@ -118,15 +118,30 @@ class OfflineDataset(Dataset):
         actions = data["actions"][local_idx]
         done = data["done"][local_idx]
 
-        if frames.dtype == np.uint8:
-            frames = frames.astype(np.float32) * np.float32(1.0 / 255.0)
+        channels_per_frame = 1
+        if frames.ndim == 4 and frames.shape[-1] == 3:
+            channels_per_frame = 3
+            if frames.dtype == np.uint8:
+                frames = frames.astype(np.float32) * np.float32(1.0 / 255.0)
+            else:
+                frames = frames.astype(np.float32, copy=False)
+            frames = np.transpose(frames, (0, 3, 1, 2)).reshape(
+                frames.shape[0] * channels_per_frame,
+                frames.shape[1],
+                frames.shape[2],
+            )
+        elif frames.ndim == 3:
+            if frames.dtype == np.uint8:
+                frames = frames.astype(np.float32) * np.float32(1.0 / 255.0)
+            else:
+                frames = frames.astype(np.float32, copy=False)
         else:
-            frames = frames.astype(np.float32, copy=False)
+            raise ValueError(f"Unsupported frame tensor shape in shard sample: {frames.shape}")
 
-        past_frames = frames[: self.n_past_frames]
-        future_frames = frames[
-            self.n_past_frames : self.n_past_frames + self.n_future_frames
-        ]
+        past_channels = self.n_past_frames * channels_per_frame
+        future_channels = self.n_future_frames * channels_per_frame
+        past_frames = frames[:past_channels]
+        future_frames = frames[past_channels : past_channels + future_channels]
         pivot = self.n_past_frames - 1
         # actions[i] corresponds to the transition from frames[i] -> frames[i+1]
         if self.n_past_actions == 0:

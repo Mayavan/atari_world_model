@@ -25,6 +25,7 @@ python -m src.dataset.generate_dataset --game coinrun --steps 300000 --out_dir d
 ```
 
 Note: CoinRun/Procgen commands require Procgen support (Python `<3.11`).
+Procgen env ids are registered into Gymnasium automatically via the procgen+shimmy bridge.
 
 Train (uses `config.yaml`):
 ```bash
